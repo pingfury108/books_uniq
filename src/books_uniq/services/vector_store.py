@@ -1,4 +1,5 @@
 import uuid
+import hashlib
 from typing import List, Dict, Any, Optional
 import chromadb
 from chromadb.config import Settings
@@ -32,6 +33,50 @@ class VectorStore:
             )
         return self._collections[collection_name]
     
+    async def check_md5_exists(self, md5_hash: str, collection_name: str = "books") -> bool:
+        """
+        检查MD5是否已存在于集合中
+        """
+        try:
+            collection = self.get_or_create_collection(collection_name)
+            
+            # 尝试查询是否存在具有该MD5的记录
+            results = collection.get(
+                where={"md5": md5_hash},
+                limit=1
+            )
+            
+            return len(results['ids']) > 0
+            
+        except Exception as e:
+            # 如果查询失败，假设不存在
+            return False
+    
+    async def check_batch_md5_exists(self, md5_hashes: List[str], collection_name: str = "books") -> Dict[str, bool]:
+        """
+        批量检查MD5是否已存在于集合中，提高效率
+        """
+        try:
+            collection = self.get_or_create_collection(collection_name)
+            
+            # 获取所有已存在的MD5哈希
+            results = collection.get(
+                include=["metadatas"]
+            )
+            
+            existing_hashes = set()
+            if results['metadatas']:
+                for metadata in results['metadatas']:
+                    if metadata and 'md5' in metadata:
+                        existing_hashes.add(metadata['md5'])
+            
+            # 为每个查询的MD5返回是否存在的结果
+            return {md5: md5 in existing_hashes for md5 in md5_hashes}
+            
+        except Exception as e:
+            # 如果查询失败，假设都不存在
+            return {md5: False for md5 in md5_hashes}
+    
     async def add_document(
         self, 
         text: str, 
@@ -40,16 +85,25 @@ class VectorStore:
         collection_name: str = "books"
     ) -> str:
         """
-        添加文档到向量数据库
+        添加文档到向量数据库（带MD5检查）
         """
         try:
             collection = self.get_or_create_collection(collection_name)
             
-            # 生成文档ID
-            document_id = str(uuid.uuid4())
-            
             # 准备元数据
             doc_metadata = metadata or {}
+            
+            # 如果没有MD5，则生成一个
+            if 'md5' not in doc_metadata:
+                doc_metadata['md5'] = hashlib.md5(text.encode('utf-8')).hexdigest()
+            
+            # 检查MD5是否已存在
+            if await self.check_md5_exists(doc_metadata['md5'], collection_name):
+                raise Exception(f"MD5 {doc_metadata['md5']} 已存在，跳过重复嵌入")
+            
+            # 生成文档ID，使用MD5作为基础
+            document_id = f"doc_{doc_metadata['md5'][:12]}"
+            
             doc_metadata.update({
                 "text_length": len(text),
                 "document_id": document_id
@@ -68,40 +122,154 @@ class VectorStore:
         except Exception as e:
             raise Exception(f"添加文档失败: {str(e)}")
     
+    async def batch_add_documents(
+        self,
+        texts: List[str],
+        embeddings: List[List[float]],
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        collection_name: str = "books"
+    ) -> Dict[str, Any]:
+        """
+        批量添加文档（带MD5检查，避免重复）
+        """
+        try:
+            collection = self.get_or_create_collection(collection_name)
+            
+            if metadatas is None:
+                metadatas = [{} for _ in texts]
+            
+            # 准备批量数据，过滤重复的MD5
+            batch_texts = []
+            batch_embeddings = []
+            batch_metadatas = []
+            batch_ids = []
+            skipped_count = 0
+            processed_hashes = set()
+            
+            for i, (text, embedding, metadata) in enumerate(zip(texts, embeddings, metadatas)):
+                # 确保每个metadata都有MD5
+                if 'md5' not in metadata:
+                    metadata['md5'] = hashlib.md5(text.encode('utf-8')).hexdigest()
+                
+                md5_hash = metadata['md5']
+                
+                # 检查是否已处理过这个MD5（在当前批次中）
+                if md5_hash in processed_hashes:
+                    skipped_count += 1
+                    continue
+                
+                # 检查数据库中是否已存在
+                if await self.check_md5_exists(md5_hash, collection_name):
+                    skipped_count += 1
+                    continue
+                
+                # 准备数据
+                document_id = f"doc_{md5_hash[:12]}"
+                metadata.update({
+                    "text_length": len(text),
+                    "document_id": document_id,
+                    "batch_index": i
+                })
+                
+                batch_texts.append(text)
+                batch_embeddings.append(embedding)
+                batch_metadatas.append(metadata)
+                batch_ids.append(document_id)
+                processed_hashes.add(md5_hash)
+            
+            # 如果有数据需要添加
+            if batch_texts:
+                collection.add(
+                    embeddings=batch_embeddings,
+                    documents=batch_texts,
+                    metadatas=batch_metadatas,
+                    ids=batch_ids
+                )
+            
+            return {
+                "added_count": len(batch_ids),
+                "skipped_count": skipped_count,
+                "total_processed": len(texts),
+                "document_ids": batch_ids
+            }
+            
+        except Exception as e:
+            raise Exception(f"批量添加文档失败: {str(e)}")
+    
     async def search_similar(
         self,
         query_embedding: List[float],
         collection_name: str = "books",
-        n_results: int = 5
+        n_results: int = 5,
+        min_similarity: float = 0.7
     ) -> List[Dict[str, Any]]:
         """
-        搜索相似文档
+        搜索相似文档（增加最小相似度阈值）
         """
         try:
             collection = self.get_or_create_collection(collection_name)
             
             results = collection.query(
                 query_embeddings=[query_embedding],
-                n_results=n_results,
+                n_results=min(n_results, 50),  # 增加查询数量以便过滤
                 include=["documents", "metadatas", "distances"]
             )
             
-            # 格式化结果
+            # 格式化结果并过滤低相似度结果
             formatted_results = []
             if results["documents"] and results["documents"][0]:
                 for i in range(len(results["documents"][0])):
-                    result = {
-                        "document": results["documents"][0][i],
-                        "metadata": results["metadatas"][0][i] if results["metadatas"] and results["metadatas"][0] else {},
-                        "distance": results["distances"][0][i] if results["distances"] and results["distances"][0] else None,
-                        "similarity": 1 - results["distances"][0][i] if results["distances"] and results["distances"][0] else None
-                    }
-                    formatted_results.append(result)
+                    distance = results["distances"][0][i] if results["distances"] and results["distances"][0] else 1.0
+                    similarity = 1 - distance
+                    
+                    # 只保留相似度高于阈值的结果
+                    if similarity >= min_similarity:
+                        result = {
+                            "document": results["documents"][0][i],
+                            "metadata": results["metadatas"][0][i] if results["metadatas"] and results["metadatas"][0] else {},
+                            "distance": distance,
+                            "similarity": similarity
+                        }
+                        formatted_results.append(result)
             
-            return formatted_results
+            # 按相似度降序排列
+            formatted_results.sort(key=lambda x: x['similarity'], reverse=True)
+            
+            return formatted_results[:n_results]
             
         except Exception as e:
             raise Exception(f"搜索失败: {str(e)}")
+    
+    async def get_collection_stats(self, collection_name: str = "books") -> Dict[str, Any]:
+        """
+        获取集合统计信息，包括MD5分布
+        """
+        try:
+            collection = self.get_or_create_collection(collection_name)
+            
+            # 获取所有记录
+            all_results = collection.get(
+                include=["metadatas"]
+            )
+            
+            total_count = len(all_results['ids'])
+            
+            # 统计MD5信息
+            md5_hashes = set()
+            if all_results['metadatas']:
+                for metadata in all_results['metadatas']:
+                    if metadata and 'md5' in metadata:
+                        md5_hashes.add(metadata['md5'])
+            
+            return {
+                "collection_name": collection_name,
+                "total_documents": total_count,
+                "unique_md5_count": len(md5_hashes),
+                "collection_metadata": collection.metadata if hasattr(collection, 'metadata') else {}
+            }
+            
+        except Exception as e:
+            raise Exception(f"获取统计信息失败: {str(e)}")
     
     async def list_collections(self) -> List[str]:
         """
@@ -129,51 +297,102 @@ class VectorStore:
         获取集合信息
         """
         try:
-            collection = self.get_or_create_collection(collection_name)
-            count = collection.count()
-            return {
-                "name": collection_name,
-                "count": count,
-                "metadata": collection.metadata
-            }
+            stats = await self.get_collection_stats(collection_name)
+            return stats
         except Exception as e:
             raise Exception(f"获取集合信息失败: {str(e)}")
     
-    async def batch_add_documents(
-        self,
-        texts: List[str],
-        embeddings: List[List[float]],
-        metadatas: Optional[List[Dict[str, Any]]] = None,
-        collection_name: str = "books"
-    ) -> List[str]:
+    async def clear_collection(self, collection_name: str = "books") -> bool:
         """
-        批量添加文档
+        清空集合
+        """
+        try:
+            if collection_name in self._collections:
+                del self._collections[collection_name]
+            
+            # 删除集合
+            try:
+                self.client.delete_collection(collection_name)
+            except:
+                pass  # 集合可能不存在
+            
+            # 重新创建空集合
+            self.get_or_create_collection(collection_name)
+            
+            return True
+        except Exception as e:
+            raise Exception(f"清空集合失败: {str(e)}")
+    
+    async def get_collection_documents(
+        self, 
+        collection_name: str = "books", 
+        limit: int = 50, 
+        offset: int = 0,
+        search_text: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        获取集合中的文档，支持分页和搜索
         """
         try:
             collection = self.get_or_create_collection(collection_name)
             
-            # 生成文档ID
-            document_ids = [str(uuid.uuid4()) for _ in texts]
-            
-            # 准备元数据
-            if metadatas is None:
-                metadatas = [{"text_length": len(text)} for text in texts]
-            else:
-                for i, metadata in enumerate(metadatas):
-                    metadata.update({
-                        "text_length": len(texts[i]),
-                        "document_id": document_ids[i]
-                    })
-            
-            # 批量添加到集合
-            collection.add(
-                embeddings=embeddings,
-                documents=texts,
-                metadatas=metadatas,
-                ids=document_ids
+            # ChromaDB没有直接的offset功能，所以我们需要获取所有数据然后手动分页
+            # 对于大数据集，这不是最优解，但ChromaDB的限制
+            all_results = collection.get(
+                include=["documents", "metadatas"]
             )
             
-            return document_ids
+            documents = []
+            if all_results['documents'] and all_results['metadatas']:
+                for i, (doc, metadata) in enumerate(zip(all_results['documents'], all_results['metadatas'])):
+                    # 如果有搜索文本，过滤结果
+                    if search_text:
+                        search_lower = search_text.lower()
+                        if not (search_lower in doc.lower() or
+                                (metadata and any(search_lower in str(v).lower() for v in metadata.values()))):
+                            continue
+                    
+                    document_data = {
+                        "id": all_results['ids'][i] if all_results['ids'] else f"doc_{i}",
+                        "document": doc,
+                        "metadata": metadata or {}
+                    }
+                    documents.append(document_data)
+            
+            # 手动实现分页
+            total_filtered = len(documents)
+            start_idx = offset
+            end_idx = min(offset + limit, total_filtered)
+            
+            return documents[start_idx:end_idx]
             
         except Exception as e:
-            raise Exception(f"批量添加文档失败: {str(e)}")
+            raise Exception(f"获取集合文档失败: {str(e)}")
+    
+    async def get_collection_count(self, collection_name: str = "books", search_text: Optional[str] = None) -> int:
+        """
+        获取集合中的文档总数，支持搜索过滤
+        """
+        try:
+            collection = self.get_or_create_collection(collection_name)
+            
+            all_results = collection.get(
+                include=["documents", "metadatas"]
+            )
+            
+            if not search_text:
+                return len(all_results['ids']) if all_results['ids'] else 0
+            
+            # 如果有搜索文本，计算匹配的文档数
+            count = 0
+            if all_results['documents'] and all_results['metadatas']:
+                search_lower = search_text.lower()
+                for doc, metadata in zip(all_results['documents'], all_results['metadatas']):
+                    if (search_lower in doc.lower() or
+                        (metadata and any(search_lower in str(v).lower() for v in metadata.values()))):
+                        count += 1
+            
+            return count
+            
+        except Exception as e:
+            raise Exception(f"获取集合文档数量失败: {str(e)}")

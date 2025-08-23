@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Books Uniq - 图书数据去重系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .main-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .upload-area {
+            border: 2px dashed #dee2e6;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            background-color: #fff;
+            transition: all 0.3s ease;
+        }
+        .upload-area:hover {
+            border-color: #0d6efd;
+            background-color: #f0f7ff;
+        }
+        .upload-area.dragover {
+            border-color: #0d6efd;
+            background-color: #e3f2fd;
+        }
+        .progress-section {
+            display: none;
+        }
+        .results-section {
+            display: none;
+        }
+        .book-card {
+            transition: all 0.3s ease;
+        }
+        .book-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .duplicate-group {
+            border-left: 4px solid #dc3545;
+            background-color: #fff5f5;
+        }
+        .unique-book {
+            border-left: 4px solid #198754;
+            background-color: #f0fff4;
+        }
+        .similarity-score {
+            font-weight: bold;
+            color: #dc3545;
+        }
+        .log-container {
+            max-height: 300px;
+            overflow-y: auto;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+        .stats-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <!-- Header -->
+        <div class="text-center mb-5">
+            <h1 class="display-4 text-primary"><i class="fas fa-book-open"></i> Books Uniq</h1>
+            <p class="lead">智能图书数据去重系统</p>
+        </div>
+
+        <!-- Upload Section -->
+        <div id="upload-section" class="mb-5">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h4><i class="fas fa-upload"></i> 上传Excel文件</h4>
+                </div>
+                <div class="card-body">
+                    <div class="upload-area" id="upload-area">
+                        <i class="fas fa-cloud-upload-alt fa-3x text-muted mb-3"></i>
+                        <h5>拖拽Excel文件到这里或点击上传</h5>
+                        <p class="text-muted">支持 .xlsx, .xls 格式</p>
+                        <input type="file" id="file-input" class="d-none" accept=".xlsx,.xls">
+                        <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">
+                            <i class="fas fa-folder-open"></i> 选择文件
+                        </button>
+                    </div>
+                    
+                    <div id="file-info" class="mt-3" style="display: none;">
+                        <div class="alert alert-info">
+                            <strong>已选择文件：</strong> <span id="file-name"></span>
+                        </div>
+                        <button class="btn btn-success" id="process-btn" onclick="processFile()">
+                            <i class="fas fa-play"></i> 开始处理
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="progress-section" class="progress-section mb-5">
+            <div class="card">
+                <div class="card-header bg-warning text-dark">
+                    <h4><i class="fas fa-cog fa-spin"></i> 处理进度</h4>
+                </div>
+                <div class="card-body">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label>向量化进度</label>
+                                <div class="progress">
+                                    <div id="embedding-progress" class="progress-bar bg-info" style="width: 0%"></div>
+                                </div>
+                                <small class="text-muted" id="embedding-status">等待开始...</small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label>去重进度</label>
+                                <div class="progress">
+                                    <div id="dedup-progress" class="progress-bar bg-success" style="width: 0%"></div>
+                                </div>
+                                <small class="text-muted" id="dedup-status">等待开始...</small>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="log-container" id="log-container">
+                        <div class="text-muted">处理日志将在这里显示...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="results-section" class="results-section">
+            <div class="row mb-4">
+                <div class="col-md-3">
+                    <div class="card stats-card text-center">
+                        <div class="card-body">
+                            <i class="fas fa-books fa-2x mb-2"></i>
+                            <h5>总书籍数</h5>
+                            <h3 id="total-books">0</h3>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card bg-success text-white text-center">
+                        <div class="card-body">
+                            <i class="fas fa-check-circle fa-2x mb-2"></i>
+                            <h5>唯一书籍</h5>
+                            <h3 id="unique-books">0</h3>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card bg-danger text-white text-center">
+                        <div class="card-body">
+                            <i class="fas fa-copy fa-2x mb-2"></i>
+                            <h5>重复书籍</h5>
+                            <h3 id="duplicate-books">0</h3>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card bg-info text-white text-center">
+                        <div class="card-body">
+                            <i class="fas fa-percentage fa-2x mb-2"></i>
+                            <h5>去重率</h5>
+                            <h3 id="dedup-rate">0%</h3>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+                    <h4><i class="fas fa-list"></i> 去重结果</h4>
+                    <button class="btn btn-light btn-sm" onclick="downloadResults()">
+                        <i class="fas fa-download"></i> 导出结果
+                    </button>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <div class="btn-group" role="group">
+                            <button class="btn btn-outline-primary active" onclick="showTab('all')">
+                                全部 (<span id="all-count">0</span>)
+                            </button>
+                            <button class="btn btn-outline-success" onclick="showTab('unique')">
+                                唯一 (<span id="unique-count">0</span>)
+                            </button>
+                            <button class="btn btn-outline-danger" onclick="showTab('duplicates')">
+                                重复 (<span id="duplicate-count">0</span>)
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div id="results-container">
+                        <!-- 结果将在这里显示 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 错误详情模态框 -->
+    <div class="modal fade" id="errorModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title">
+                        <i class="fas fa-exclamation-triangle"></i> 错误详情
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="error-details">
+                        <!-- 错误详情将在这里显示 -->
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-primary" onclick="copyErrorToClipboard()">
+                        <i class="fas fa-copy"></i> 复制错误信息
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let currentFile = null;
+        let processResults = [];
+        let currentTab = 'all';
+
+        // 文件上传处理
+        const uploadArea = document.getElementById('upload-area');
+        const fileInput = document.getElementById('file-input');
+        const fileInfo = document.getElementById('file-info');
+        const fileName = document.getElementById('file-name');
+
+        // 拖拽上传
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        function handleFile(file) {
+            if (!file.name.match(/\.(xlsx|xls)$/)) {
+                alert('请选择Excel文件 (.xlsx 或 .xls)');
+                return;
+            }
+            
+            currentFile = file;
+            fileName.textContent = file.name;
+            fileInfo.style.display = 'block';
+        }
+
+        // 处理文件
+        async function processFile() {
+            if (!currentFile) return;
+
+            // 显示进度区域
+            document.getElementById('progress-section').style.display = 'block';
+            document.getElementById('process-btn').disabled = true;
+            
+            // 重置进度
+            updateProgress('embedding', 0, '准备上传文件...');
+            updateProgress('dedup', 0, '等待向量化完成...');
+            addLog('开始处理文件: ' + currentFile.name);
+
+            try {
+                // 1. 上传并解析Excel文件
+                const formData = new FormData();
+                formData.append('file', currentFile);
+                
+                addLog('正在上传和解析Excel文件...');
+                const uploadResponse = await fetch('/upload-excel', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!uploadResponse.ok) {
+                    throw new Error('文件上传失败');
+                }
+                
+                const uploadData = await uploadResponse.json();
+                addLog(`文件解析完成，共发现 ${uploadData.total_records} 条记录`);
+                
+                // 2. 批量向量化
+                await performEmbedding(uploadData.records);
+                
+                // 3. 相似性搜索和去重
+                await performDeduplication(uploadData.records);
+                
+            } catch (error) {
+                addLog(`处理失败: ${error.message}`, 'error');
+                alert('处理失败: ' + error.message);
+            } finally {
+                document.getElementById('process-btn').disabled = false;
+            }
+        }
+
+        // 向量化处理
+        async function performEmbedding(records) {
+            updateProgress('embedding', 0, '正在检查已存在记录...');
+            addLog(`开始检查 ${records.length} 条记录是否已存在...`);
+            
+            // 预估时间现在包括检查步骤（检查时间很短，主要是向量化时间）
+            const batchSize = 100;
+            // 注意：实际需要向量化的数量会在检查后确定
+            const maxExpectedBatches = Math.ceil(records.length / batchSize);
+            const delaySeconds = 3.0; // 与后端保持一致
+            const maxEstimatedMinutes = (maxExpectedBatches * delaySeconds) / 60;
+            
+            if (maxExpectedBatches > 1) {
+                addLog(`遵守API限制：每批 ${batchSize} 条，最多 ${maxExpectedBatches} 批次`, 'info');
+                addLog(`预计最大耗时约 ${maxEstimatedMinutes.toFixed(1)} 分钟（如果全部需要向量化）`, 'warning');
+                addLog(`如有已存在记录将大幅减少处理时间`, 'info');
+            }
+            
+            try {
+                // 使用新的process-books接口
+                const startTime = Date.now();
+                const response = await fetch('/process-books', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        records: records,
+                        collection_name: 'books'
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorMessage = await handleApiError(response, '向量化处理');
+                    throw new Error(errorMessage);
+                }
+                
+                const result = await response.json();
+                const actualMinutes = (Date.now() - startTime) / 60000;
+                
+                updateProgress('embedding', 100, '向量化完成');
+                addLog(`向量化完成: 添加 ${result.added_count} 条，跳过重复 ${result.skipped_count} 条`, 'success');
+                addLog(`实际耗时 ${actualMinutes.toFixed(1)} 分钟`, 'info');
+                
+                if (result.skipped_count > 0) {
+                    addLog(`跳过 ${result.skipped_count} 条重复记录（基于MD5去重）`, 'warning');
+                }
+                
+                // 显示API使用统计
+                if (expectedBatches > 1) {
+                    const avgTimePerBatch = actualMinutes * 60 / expectedBatches;
+                    addLog(`平均每批次耗时 ${avgTimePerBatch.toFixed(1)} 秒`, 'info');
+                }
+                
+                return result;
+                
+            } catch (error) {
+                addLog(`向量化处理失败: ${error.message}`, 'error');
+                throw error;
+            }
+        }
+
+        // 去重处理
+        async function performDeduplication(records) {
+            updateProgress('dedup', 0, '开始相似性检测...');
+            addLog('开始相似性检测和去重处理...');
+            
+            try {
+                const response = await fetch('/find-duplicates', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        records: records,
+                        collection_name: 'books',
+                        similarity_threshold: 0.85
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorMessage = await handleApiError(response, '去重处理');
+                    throw new Error(errorMessage);
+                }
+                
+                const duplicateData = await response.json();
+                
+                // 整理结果数据
+                const results = [];
+                const processedIndices = new Set();
+                
+                // 处理重复组
+                duplicateData.duplicate_groups.forEach(group => {
+                    results.push({
+                        ...group.original,
+                        type: 'duplicate',
+                        duplicates: group.duplicates.map(dup => ({
+                            ...dup.record,
+                            similarity: dup.similarity
+                        }))
+                    });
+                    
+                    processedIndices.add(group.original_index);
+                    group.duplicates.forEach(dup => {
+                        processedIndices.add(dup.original_index);
+                    });
+                });
+                
+                // 处理唯一记录
+                records.forEach((record, index) => {
+                    if (!processedIndices.has(index)) {
+                        results.push({
+                            ...record,
+                            type: 'unique'
+                        });
+                    }
+                });
+                
+                processResults = results;
+                
+                updateProgress('dedup', 100, '去重完成');
+                addLog(`去重处理完成: 发现 ${duplicateData.total_groups} 个重复组，处理了 ${duplicateData.processed_records} 条记录`, 'success');
+                
+                // 显示结果
+                displayResults();
+                
+            } catch (error) {
+                addLog(`去重处理失败: ${error.message}`, 'error');
+                throw error;
+            }
+        }
+
+        // 显示结果
+        function displayResults() {
+            const uniqueBooks = processResults.filter(r => r.type === 'unique').length;
+            const duplicateBooks = processResults.filter(r => r.type === 'duplicate').length;
+            const totalBooks = processResults.length;
+            const dedupRate = totalBooks > 0 ? Math.round(((totalBooks - duplicateBooks) / totalBooks) * 100) : 0;
+            
+            // 更新统计数据
+            document.getElementById('total-books').textContent = totalBooks;
+            document.getElementById('unique-books').textContent = uniqueBooks;
+            document.getElementById('duplicate-books').textContent = duplicateBooks;
+            document.getElementById('dedup-rate').textContent = dedupRate + '%';
+            
+            document.getElementById('all-count').textContent = totalBooks;
+            document.getElementById('unique-count').textContent = uniqueBooks;
+            document.getElementById('duplicate-count').textContent = duplicateBooks;
+            
+            // 显示结果区域
+            document.getElementById('results-section').style.display = 'block';
+            
+            // 渲染结果列表
+            renderResultsList();
+        }
+
+        // 渲染结果列表
+        function renderResultsList() {
+            const container = document.getElementById('results-container');
+            let filteredResults = processResults;
+            
+            if (currentTab === 'unique') {
+                filteredResults = processResults.filter(r => r.type === 'unique');
+            } else if (currentTab === 'duplicates') {
+                filteredResults = processResults.filter(r => r.type === 'duplicate');
+            }
+            
+            let html = '';
+            
+            filteredResults.forEach((result, index) => {
+                const cardClass = result.type === 'unique' ? 'unique-book' : 'duplicate-group';
+                
+                html += `
+                    <div class="card book-card ${cardClass} mb-3">
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <h5 class="card-title">${result.title || '未知书名'}</h5>
+                                    <p class="card-text">
+                                        <strong>作者:</strong> ${result.author || '未知作者'}<br>
+                                        <strong>出版社:</strong> ${result.publisher || '未知出版社'}<br>
+                                        ${result.formatted_text ? `<small class="text-muted">格式化: ${result.formatted_text}</small><br>` : ''}
+                                        ${result.md5 ? `<small class="text-muted">MD5: ${result.md5.substring(0, 8)}...</small>` : ''}
+                                    </p>
+                                </div>
+                                <div class="col-md-4 text-end">
+                                    <span class="badge ${result.type === 'unique' ? 'bg-success' : 'bg-danger'} mb-2">
+                                        ${result.type === 'unique' ? '唯一' : '重复'}
+                                    </span>
+                                    ${result.duplicates ? `<div class="text-muted"><small>发现 ${result.duplicates.length} 个相似项</small></div>` : ''}
+                                </div>
+                            </div>
+                            
+                            ${result.duplicates ? `
+                                <div class="mt-3">
+                                    <button class="btn btn-sm btn-outline-danger" type="button" data-bs-toggle="collapse" data-bs-target="#duplicates-${index}">
+                                        查看重复项 (${result.duplicates.length})
+                                    </button>
+                                    <div class="collapse mt-2" id="duplicates-${index}">
+                                        ${result.duplicates.map(dup => `
+                                            <div class="border-start border-danger ps-3 ms-2 mb-2">
+                                                <div class="d-flex justify-content-between">
+                                                    <div>
+                                                        <strong>${dup.title || '未知书名'}</strong><br>
+                                                        <small class="text-muted">${dup.author || '未知作者'} - ${dup.publisher || '未知出版社'}</small>
+                                                        ${dup.md5 ? `<br><small class="text-muted">MD5: ${dup.md5.substring(0, 8)}...</small>` : ''}
+                                                    </div>
+                                                    <div class="similarity-score">${(dup.similarity * 100).toFixed(1)}%</div>
+                                                </div>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            if (html === '') {
+                html = '<div class="text-center text-muted py-4">暂无数据</div>';
+            }
+            
+            container.innerHTML = html;
+        }
+
+        // 切换标签
+        function showTab(tab) {
+            currentTab = tab;
+            
+            // 更新按钮状态
+            document.querySelectorAll('.btn-group .btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            renderResultsList();
+        }
+
+        // 更新进度
+        function updateProgress(type, percentage, status) {
+            document.getElementById(`${type}-progress`).style.width = `${percentage}%`;
+            document.getElementById(`${type}-status`).textContent = status;
+        }
+
+        // 添加日志
+        function addLog(message, type = 'info') {
+            const logContainer = document.getElementById('log-container');
+            const timestamp = new Date().toLocaleTimeString();
+            let colorClass = 'text-info';
+            let icon = 'fas fa-info-circle';
+            
+            switch(type) {
+                case 'error':
+                    colorClass = 'text-danger';
+                    icon = 'fas fa-exclamation-triangle';
+                    break;
+                case 'warning':
+                    colorClass = 'text-warning';
+                    icon = 'fas fa-exclamation-circle';
+                    break;
+                case 'success':
+                    colorClass = 'text-success';
+                    icon = 'fas fa-check-circle';
+                    break;
+            }
+            
+            const logEntry = `
+                <div class="${colorClass} mb-1">
+                    <i class="${icon}"></i> [${timestamp}] ${message}
+                </div>
+            `;
+            logContainer.innerHTML += logEntry;
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // 处理API错误响应
+        async function handleApiError(response, operation) {
+            let errorMessage = `${operation}失败`;
+            
+            try {
+                const errorData = await response.json();
+                
+                if (errorData.detail) {
+                    errorMessage = errorData.detail;
+                }
+                
+                // 如果有错误ID，添加到日志中
+                if (errorData.error_id) {
+                    addLog(`错误ID: ${errorData.error_id}`, 'error');
+                }
+                
+                // 如果有错误类型，添加到日志中
+                if (errorData.error_type) {
+                    addLog(`错误类型: ${errorData.error_type}`, 'error');
+                }
+                
+                // 显示完整错误信息
+                if (errorData.error_message && errorData.error_message !== errorData.detail) {
+                    addLog(`详细信息: ${errorData.error_message}`, 'error');
+                }
+                
+            } catch (e) {
+                // 如果无法解析JSON，使用默认错误信息
+                errorMessage = `${operation}失败: HTTP ${response.status} ${response.statusText}`;
+            }
+            
+            return errorMessage;
+        }
+
+        // 显示详细错误模态框
+        function showErrorDetails(error, operation) {
+            const errorDetails = document.getElementById('error-details');
+            
+            let detailsHtml = `
+                <div class="alert alert-danger">
+                    <h6><i class="fas fa-bug"></i> 操作失败: ${operation}</h6>
+                    <p><strong>错误信息:</strong> ${error.message || error}</p>
+                </div>
+            `;
+            
+            // 如果有额外的错误信息
+            if (error.error_id) {
+                detailsHtml += `
+                    <div class="mb-3">
+                        <label class="form-label"><strong>错误追踪ID:</strong></label>
+                        <input type="text" class="form-control" value="${error.error_id}" readonly>
+                    </div>
+                `;
+            }
+            
+            if (error.error_type) {
+                detailsHtml += `
+                    <div class="mb-3">
+                        <label class="form-label"><strong>错误类型:</strong></label>
+                        <input type="text" class="form-control" value="${error.error_type}" readonly>
+                    </div>
+                `;
+            }
+            
+            if (error.stack) {
+                detailsHtml += `
+                    <div class="mb-3">
+                        <label class="form-label"><strong>堆栈追踪:</strong></label>
+                        <textarea class="form-control" rows="8" readonly>${error.stack}</textarea>
+                    </div>
+                `;
+            }
+            
+            detailsHtml += `
+                <div class="text-muted">
+                    <small>
+                        <i class="fas fa-info-circle"></i> 
+                        如果问题持续存在，请将错误ID和详细信息提供给技术支持。
+                        <br>
+                        <i class="fas fa-clock"></i> 
+                        错误发生时间: ${new Date().toLocaleString()}
+                    </small>
+                </div>
+            `;
+            
+            errorDetails.innerHTML = detailsHtml;
+            
+            // 显示模态框
+            const errorModal = new bootstrap.Modal(document.getElementById('errorModal'));
+            errorModal.show();
+        }
+
+        // 复制错误信息到剪贴板
+        function copyErrorToClipboard() {
+            const errorDetails = document.getElementById('error-details');
+            const textToCopy = errorDetails.innerText || errorDetails.textContent;
+            
+            navigator.clipboard.writeText(textToCopy).then(() => {
+                addLog('错误信息已复制到剪贴板', 'success');
+            }).catch(() => {
+                addLog('复制失败，请手动复制', 'warning');
+            });
+        }
+
+        // 导出结果
+        function downloadResults() {
+            const csvContent = convertToCSV();
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = 'books_dedup_results.csv';
+            link.click();
+        }
+
+        function convertToCSV() {
+            const headers = ['书名', '作者', '出版社', '格式化文本', 'MD5', '状态', '相似项数量'];
+            let csv = headers.join(',') + '\n';
+            
+            processResults.forEach(result => {
+                const row = [
+                    `"${result.title || ''}"`,
+                    `"${result.author || ''}"`,
+                    `"${result.publisher || ''}"`,
+                    `"${result.formatted_text || ''}"`,
+                    `"${result.md5 || ''}"`,
+                    result.type === 'unique' ? '唯一' : '重复',
+                    result.duplicates ? result.duplicates.length : 0
+                ];
+                csv += row.join(',') + '\n';
+            });
+            
+            return csv;
+        }
+    </script>
+</body>
+</html>
