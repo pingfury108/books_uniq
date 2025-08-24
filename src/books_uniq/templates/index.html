@@ -772,7 +772,12 @@
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
-            link.download = 'books_dedup_results.csv';
+            
+            // 生成带时间戳和原始文件名的导出文件名
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            const originalFileName = currentFile ? currentFile.name.replace(/\.[^\.]+$/, '') : 'unknown';
+            link.download = `去重结果_${originalFileName}_${timestamp}.csv`;
+            
             link.click();
         }
 
@@ -788,7 +793,7 @@
                 // 为重复组分配ID
                 let groupId = '';
                 if (result.type === 'duplicate' && result.duplicates) {
-                    const groupKey = result.original_index + '_' + result.duplicates.map(d => d.original_index).join('_');
+                    const groupKey = (result.original_index + 1) + '_' + result.duplicates.map(d => d.original_index + 1).join('_');
                     if (!groupIdMap.has(groupKey)) {
                         groupIdMap.set(groupKey, groupCounter++);
                     }
@@ -803,7 +808,7 @@
                     `"${result.publisher || ''}"`,
                     '', // 相似度（主记录为空）
                     '', // 匹配类型
-                    result.original_index !== undefined ? result.original_index : '',
+                    result.original_index !== undefined ? result.original_index + 1 : '',
                     groupId || ''
                 ];
                 csv += mainRow.join(',') + '\n';
@@ -818,7 +823,7 @@
                             `"${duplicate.publisher || ''}"`,
                             duplicate.similarity ? (duplicate.similarity * 100).toFixed(1) + '%' : '',
                             duplicate.match_type || '',
-                            duplicate.original_index !== undefined ? duplicate.original_index : '',
+                            duplicate.original_index !== undefined ? duplicate.original_index + 1 : '',
                             groupId || ''
                         ];
                         csv += dupRow.join(',') + '\n';
@@ -836,7 +841,7 @@
                         `"${result.publisher || ''}"`,
                         '',
                         '',
-                        result.original_index !== undefined ? result.original_index : '',
+                        result.original_index !== undefined ? result.original_index + 1 : '',
                         ''
                     ];
                     csv += uniqueRow.join(',') + '\n';
