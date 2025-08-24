@@ -135,26 +135,43 @@ class ExcelProcessor:
     
     def _get_column_mapping(self, columns: List[str]) -> Dict[str, str]:
         """
-        根据列名内容智能映射到标准字段名
+        根据列名内容智能映射到标准字段名，确保每个标准字段只映射一次
+        只映射书名、作者、出版社这3个核心字段
         """
         mapping = {}
         
-        # 定义字段识别规则 - 只关注三个核心字段
+        # 定义字段识别规则，按优先级排序
         field_patterns = {
-            'title': ['书名', '标题', '图书名称', '名称', 'title', 'book', 'name', '书'],
-            'author': ['作者', '编者', '主编', 'author', 'writer', 'editor', '著者'],
-            'publisher': ['出版社', '出版商', 'publisher', 'press', '版社', '出版']
+            'title': ['书名', '图书名', '书籍名称', '标题'],  # 支持书名的常见变体
+            'author': ['作者', '著者', '编者'],  # 支持作者的常见变体
+            'publisher': ['出版社', '出版商', '版社']  # 支持出版社的常见变体
         }
         
-        for col in columns:
-            col_lower = col.lower().strip()
-            for standard_field, patterns in field_patterns.items():
+        # 为每个标准字段找到最佳匹配的列
+        for standard_field, patterns in field_patterns.items():
+            best_match = None
+            
+            for col in columns:
+                if col in mapping:  # 已经被映射过，跳过
+                    continue
+                    
+                col_stripped = col.strip()
+                
+                # 查找完全匹配或最相似的列
                 for pattern in patterns:
-                    if pattern.lower() in col_lower or col_lower in pattern.lower():
-                        mapping[col] = standard_field
+                    if col_stripped == pattern:  # 完全匹配优先
+                        best_match = col
                         break
-                if col in mapping:
+                    elif pattern in col_stripped:  # 包含匹配
+                        if best_match is None:
+                            best_match = col
+                
+                if best_match:
                     break
+            
+            # 如果找到匹配，添加映射
+            if best_match:
+                mapping[best_match] = standard_field
         
         return mapping
     

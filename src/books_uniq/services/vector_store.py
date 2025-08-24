@@ -5,6 +5,13 @@ import chromadb
 from chromadb.config import Settings
 from ..config import settings
 
+# 检查是否安装了numpy
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
 
 class VectorStore:
     def __init__(self):
@@ -65,8 +72,9 @@ class VectorStore:
             )
             
             existing_hashes = set()
-            if results['metadatas']:
-                for metadata in results['metadatas']:
+            metadatas = results.get('metadatas')
+            if metadatas is not None and len(metadatas) > 0:
+                for metadata in metadatas:
                     if metadata and 'md5' in metadata:
                         existing_hashes.add(metadata['md5'])
             
@@ -217,16 +225,20 @@ class VectorStore:
             
             # 格式化结果并过滤低相似度结果
             formatted_results = []
-            if results["documents"] and results["documents"][0]:
-                for i in range(len(results["documents"][0])):
-                    distance = results["distances"][0][i] if results["distances"] and results["distances"][0] else 1.0
+            documents = results.get("documents")
+            if documents is not None and len(documents) > 0 and len(documents[0]) > 0:
+                distances = results.get("distances")
+                metadatas = results.get("metadatas")
+                
+                for i in range(len(documents[0])):
+                    distance = distances[0][i] if distances is not None and len(distances) > 0 and len(distances[0]) > i else 1.0
                     similarity = 1 - distance
                     
                     # 只保留相似度高于阈值的结果
                     if similarity >= min_similarity:
                         result = {
-                            "document": results["documents"][0][i],
-                            "metadata": results["metadatas"][0][i] if results["metadatas"] and results["metadatas"][0] else {},
+                            "document": documents[0][i],
+                            "metadata": metadatas[0][i] if metadatas is not None and len(metadatas) > 0 and len(metadatas[0]) > i else {},
                             "distance": distance,
                             "similarity": similarity
                         }
@@ -252,12 +264,13 @@ class VectorStore:
                 include=["metadatas"]
             )
             
-            total_count = len(all_results['ids'])
+            total_count = len(all_results.get('ids', []))
             
             # 统计MD5信息
             md5_hashes = set()
-            if all_results['metadatas']:
-                for metadata in all_results['metadatas']:
+            metadatas = all_results.get('metadatas')
+            if metadatas is not None and len(metadatas) > 0:
+                for metadata in metadatas:
                     if metadata and 'md5' in metadata:
                         md5_hashes.add(metadata['md5'])
             
@@ -343,8 +356,11 @@ class VectorStore:
             )
             
             documents = []
-            if all_results['documents'] and all_results['metadatas']:
-                for i, (doc, metadata) in enumerate(zip(all_results['documents'], all_results['metadatas'])):
+            all_documents = all_results.get('documents')
+            all_metadatas = all_results.get('metadatas')
+            if all_documents is not None and all_metadatas is not None and len(all_documents) > 0 and len(all_metadatas) > 0:
+                all_ids = all_results.get('ids')
+                for i, (doc, metadata) in enumerate(zip(all_documents, all_metadatas)):
                     # 如果有搜索文本，过滤结果
                     if search_text:
                         search_lower = search_text.lower()
@@ -353,7 +369,7 @@ class VectorStore:
                             continue
                     
                     document_data = {
-                        "id": all_results['ids'][i] if all_results['ids'] else f"doc_{i}",
+                        "id": all_ids[i] if all_ids is not None and len(all_ids) > i else f"doc_{i}",
                         "document": doc,
                         "metadata": metadata or {}
                     }
@@ -381,13 +397,16 @@ class VectorStore:
             )
             
             if not search_text:
-                return len(all_results['ids']) if all_results['ids'] else 0
+                all_ids = all_results.get('ids')
+                return len(all_ids) if all_ids is not None else 0
             
             # 如果有搜索文本，计算匹配的文档数
             count = 0
-            if all_results['documents'] and all_results['metadatas']:
+            all_documents = all_results.get('documents')
+            all_metadatas = all_results.get('metadatas')
+            if all_documents is not None and all_metadatas is not None and len(all_documents) > 0 and len(all_metadatas) > 0:
                 search_lower = search_text.lower()
-                for doc, metadata in zip(all_results['documents'], all_results['metadatas']):
+                for doc, metadata in zip(all_documents, all_metadatas):
                     if (search_lower in doc.lower() or
                         (metadata and any(search_lower in str(v).lower() for v in metadata.values()))):
                         count += 1
@@ -414,11 +433,14 @@ class VectorStore:
                 include=["metadatas", "documents"]
             )
             
-            if not results['ids'] or len(results['ids']) == 0:
+            ids = results.get('ids')
+            if ids is None or len(ids) == 0:
                 raise Exception(f"文档 {document_id} 未找到")
             
-            metadata = results['metadatas'][0] if results['metadatas'] and results['metadatas'][0] else {}
-            document = results['documents'][0] if results['documents'] and results['documents'][0] else ""
+            metadatas = results.get('metadatas')
+            documents = results.get('documents')
+            metadata = metadatas[0] if metadatas is not None and len(metadatas) > 0 and metadatas[0] else {}
+            document = documents[0] if documents is not None and len(documents) > 0 and documents[0] else ""
             
             return {
                 "document_id": document_id,
@@ -429,3 +451,50 @@ class VectorStore:
             
         except Exception as e:
             raise Exception(f"获取文档元数据失败: {str(e)}")
+
+    async def get_embedding_by_md5(
+        self, 
+        md5_hash: str, 
+        collection_name: str = "books"
+    ) -> Optional[List[float]]:
+        """
+        通过MD5哈希获取单个记录的嵌入向量
+        """
+        try:
+            collection = self.get_or_create_collection(collection_name)
+            
+            # 获取指定MD5的记录
+            results = collection.get(
+                where={"md5": md5_hash},
+                include=["embeddings"],
+                limit=1
+            )
+            
+            # 检查是否有结果，避免直接使用numpy数组在if条件中
+            ids = results.get('ids')
+            if ids is None or len(ids) == 0:
+                return None
+                
+            embeddings = results.get('embeddings')
+            if embeddings is None or len(embeddings) == 0:
+                return None
+                
+            # 获取第一个匹配记录的嵌入向量
+            embedding_array = embeddings[0]
+            
+            # 安全地转换为Python列表
+            if HAS_NUMPY and isinstance(embedding_array, np.ndarray):
+                return embedding_array.tolist()
+            elif hasattr(embedding_array, 'tolist'):
+                return embedding_array.tolist()
+            elif isinstance(embedding_array, list):
+                return embedding_array
+            else:
+                return None
+                
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"获取MD5 {md5_hash} 的嵌入向量失败: {str(e)}")
+            return None
+

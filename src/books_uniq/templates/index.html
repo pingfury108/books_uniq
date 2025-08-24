@@ -356,32 +356,58 @@
             updateProgress('embedding', 0, '正在检查已存在记录...');
             addLog(`开始检查 ${records.length} 条记录是否已存在...`);
             
-            // 预估时间现在包括检查步骤（检查时间很短，主要是向量化时间）
-            const batchSize = 100;
-            // 注意：实际需要向量化的数量会在检查后确定
-            const maxExpectedBatches = Math.ceil(records.length / batchSize);
-            const delaySeconds = 3.0; // 与后端保持一致
-            const maxEstimatedMinutes = (maxExpectedBatches * delaySeconds) / 60;
+            const batchSize = 50; // 与后端保持一致
+            const totalBatches = Math.ceil(records.length / batchSize);
             
-            if (maxExpectedBatches > 1) {
-                addLog(`遵守API限制：每批 ${batchSize} 条，最多 ${maxExpectedBatches} 批次`, 'info');
-                addLog(`预计最大耗时约 ${maxEstimatedMinutes.toFixed(1)} 分钟（如果全部需要向量化）`, 'warning');
-                addLog(`如有已存在记录将大幅减少处理时间`, 'info');
-            }
+            addLog(`将分 ${totalBatches} 批次处理，每批 ${batchSize} 条记录`, 'info');
             
             try {
-                // 使用新的process-books接口
-                const startTime = Date.now();
-                const response = await fetch('/process-books', {
+                // 启动处理请求（异步）
+                const processPromise = fetch('/process-books', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
                         records: records,
-                        collection_name: 'books'
+                        collection_name: 'books',
+                        batch_size: batchSize
                     })
                 });
+                
+                // 启动进度监控
+                const progressInterval = setInterval(async () => {
+                    try {
+                        const statusResponse = await fetch('/processing-status');
+                        if (statusResponse.ok) {
+                            const status = await statusResponse.json();
+                            
+                            if (status.is_processing) {
+                                // 更新进度条
+                                const progress = (status.current_batch / status.total_batches) * 100;
+                                updateProgress('embedding', progress, status.current_operation);
+                                
+                                // 添加进度日志
+                                if (status.current_batch > 0) {
+                                    const eta = status.estimated_remaining_seconds 
+                                        ? `，预计剩余 ${Math.ceil(status.estimated_remaining_seconds / 60)} 分钟`
+                                        : '';
+                                    addLog(`进度: ${status.current_batch}/${status.total_batches} 批次 (${progress.toFixed(1)}%)${eta}`, 'info');
+                                }
+                            } else {
+                                // 处理完成，停止监控
+                                clearInterval(progressInterval);
+                            }
+                        }
+                    } catch (e) {
+                        // 静默处理进度获取错误
+                        console.debug('Progress fetch failed:', e);
+                    }
+                }, 2000); // 每2秒检查一次进度
+                
+                // 等待处理完成
+                const response = await processPromise;
+                clearInterval(progressInterval); // 确保停止监控
                 
                 if (!response.ok) {
                     const errorMessage = await handleApiError(response, '向量化处理');
@@ -389,20 +415,17 @@
                 }
                 
                 const result = await response.json();
-                const actualMinutes = (Date.now() - startTime) / 60000;
                 
                 updateProgress('embedding', 100, '向量化完成');
                 addLog(`向量化完成: 添加 ${result.added_count} 条，跳过重复 ${result.skipped_count} 条`, 'success');
-                addLog(`实际耗时 ${actualMinutes.toFixed(1)} 分钟`, 'info');
                 
                 if (result.skipped_count > 0) {
                     addLog(`跳过 ${result.skipped_count} 条重复记录（基于MD5去重）`, 'warning');
                 }
                 
-                // 显示API使用统计
-                if (maxExpectedBatches > 1) {
-                    const avgTimePerBatch = actualMinutes * 60 / maxExpectedBatches;
-                    addLog(`平均每批次耗时 ${avgTimePerBatch.toFixed(1)} 秒`, 'info');
+                // 显示流式处理统计
+                if (result.processing_info && result.processing_info.streaming_mode) {
+                    addLog(`流式处理完成: ${result.processing_info.total_batches} 批次，每批 ${result.processing_info.batch_size} 条`, 'info');
                 }
                 
                 return result;
@@ -418,7 +441,13 @@
             updateProgress('dedup', 0, '开始相似性检测...');
             addLog('开始相似性检测和去重处理...');
             
+            // 预估去重时间（基于记录数量）
+            const estimatedSeconds = Math.max(10, records.length * 0.1); // 每条记录约0.1秒
+            addLog(`预计去重耗时约 ${Math.ceil(estimatedSeconds / 60)} 分钟`, 'info');
+            
             try {
+                const startTime = Date.now();
+                
                 const response = await fetch('/find-duplicates', {
                     method: 'POST',
                     headers: {
@@ -437,6 +466,7 @@
                 }
                 
                 const duplicateData = await response.json();
+                const actualMinutes = (Date.now() - startTime) / 60000;
                 
                 // 整理结果数据
                 const results = [];
@@ -473,6 +503,13 @@
                 
                 updateProgress('dedup', 100, '去重完成');
                 addLog(`去重处理完成: 发现 ${duplicateData.total_groups} 个重复组，处理了 ${duplicateData.processed_records} 条记录`, 'success');
+                addLog(`实际耗时 ${actualMinutes.toFixed(1)} 分钟`, 'info');
+                
+                // 显示性能统计
+                if (duplicateData.performance_stats) {
+                    const stats = duplicateData.performance_stats;
+                    addLog(`向量复用统计: 复用 ${stats.reused_embeddings} 个，新生成 ${stats.new_embeddings} 个 (效率: ${stats.efficiency_ratio})`, 'success');
+                }
                 
                 // 显示结果
                 displayResults();

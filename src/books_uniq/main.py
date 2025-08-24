@@ -279,111 +279,214 @@ async def embed_texts_batch(request: BatchEmbedRequest):
         raise HTTPException(status_code=500, detail=f"批量嵌入失败: {str(e)}")
 
 
+# 用于跟踪处理进度的全局状态
+processing_status = {
+    "is_processing": False,
+    "current_batch": 0,
+    "total_batches": 0,
+    "processed_records": 0,
+    "total_records": 0,
+    "added_count": 0,
+    "skipped_count": 0,
+    "current_operation": "",
+    "start_time": None,
+    "estimated_completion": None
+}
+
+
+@app.get("/processing-status")
+async def get_processing_status():
+    """
+    获取当前处理状态
+    """
+    status = processing_status.copy()
+    
+    if status["is_processing"] and status["start_time"]:
+        import time
+        elapsed = time.time() - status["start_time"]
+        if status["current_batch"] > 0:
+            # 估算剩余时间
+            avg_time_per_batch = elapsed / status["current_batch"]
+            remaining_batches = status["total_batches"] - status["current_batch"]
+            estimated_remaining = avg_time_per_batch * remaining_batches
+            status["estimated_remaining_seconds"] = int(estimated_remaining)
+        
+        status["elapsed_seconds"] = int(elapsed)
+    
+    return status
+
+
 @app.post("/process-books")
 async def process_books_data(request: dict):
     """
-    处理图书数据：格式化、向量化、去重
+    处理图书数据：格式化、向量化、去重（流式处理，分批写入）
     """
+    global processing_status
+    
+    # 检查是否已有任务在进行
+    if processing_status["is_processing"]:
+        raise HTTPException(status_code=409, detail="已有处理任务正在进行中，请稍后再试")
+    
     records = request.get('records', [])
     collection_name = request.get('collection_name', 'books')
+    batch_size = request.get('batch_size', 50)  # 每批处理50条记录
     
-    logger.info(f"开始处理 {len(records)} 条图书数据，集合: {collection_name}")
+    # 初始化进度状态
+    import time
+    processing_status.update({
+        "is_processing": True,
+        "current_batch": 0,
+        "total_batches": (len(records) + batch_size - 1) // batch_size,
+        "processed_records": 0,
+        "total_records": len(records),
+        "added_count": 0,
+        "skipped_count": 0,
+        "current_operation": "开始处理",
+        "start_time": time.time(),
+        "estimated_completion": None
+    })
+    
+    logger.info(f"开始流式处理 {len(records)} 条图书数据，集合: {collection_name}, 批大小: {batch_size}")
     
     try:
         if not records:
             logger.warning("没有提供数据记录")
             raise HTTPException(status_code=400, detail="没有提供数据记录")
         
-        # 第一步：批量检查哪些记录已存在，避免重复向量化
-        logger.info("开始检查已存在的记录...")
-        all_md5s = []
-        record_data = []
+        # 统计信息
+        total_processed = 0
+        total_added = 0
+        total_skipped = 0
+        all_document_ids = []
         
-        # 准备所有记录的数据和MD5
-        for i, record in enumerate(records):
-            # 使用分号分隔的格式
-            formatted_text = record.get('formatted_text', '')
-            if not formatted_text:
-                # 如果没有格式化文本，则创建一个
-                formatted_text = f"{record.get('title', '')};{record.get('author', '')};{record.get('publisher', '')}"
+        # 分批处理记录
+        total_batches = processing_status["total_batches"]
+        
+        for batch_num in range(0, len(records), batch_size):
+            batch_records = records[batch_num:batch_num + batch_size]
+            current_batch = (batch_num // batch_size) + 1
             
-            # 准备元数据
-            metadata = {
-                'title': record.get('title', ''),
-                'author': record.get('author', ''),
-                'publisher': record.get('publisher', ''),
-                'md5': record.get('md5', ''),
-                'original_index': record.get('original_index', i)
-            }
-            
-            all_md5s.append(metadata['md5'])
-            record_data.append({
-                'formatted_text': formatted_text,
-                'metadata': metadata
+            # 更新进度状态
+            processing_status.update({
+                "current_batch": current_batch,
+                "current_operation": f"处理批次 {current_batch}/{total_batches}"
             })
-        
-        # 批量检查MD5是否存在
-        logger.info(f"批量检查 {len(all_md5s)} 个MD5哈希...")
-        md5_exists_map = await vector_store.check_batch_md5_exists(all_md5s, collection_name)
-        
-        # 过滤出需要向量化的记录
-        texts_to_embed = []
-        metadatas_to_embed = []
-        existing_count = 0
-        
-        for record_item in record_data:
-            metadata = record_item['metadata']
-            if md5_exists_map.get(metadata['md5'], False):
-                existing_count += 1
-                logger.debug(f"跳过已存在记录: {metadata['md5'][:8]}...")
+            
+            logger.info(f"处理批次 {current_batch}/{total_batches}，记录 {batch_num+1}-{min(batch_num+batch_size, len(records))}")
+            
+            # 准备当前批次的数据
+            batch_texts = []
+            batch_metadatas = []
+            batch_existing_count = 0
+            
+            processing_status["current_operation"] = f"检查批次 {current_batch} 中的重复记录"
+            
+            for i, record in enumerate(batch_records):
+                # 使用分号分隔的格式
+                formatted_text = record.get('formatted_text', '')
+                if not formatted_text:
+                    formatted_text = f"{record.get('title', '')};{record.get('author', '')};{record.get('publisher', '')}"
+                
+                # 准备元数据
+                metadata = {
+                    'title': record.get('title', ''),
+                    'author': record.get('author', ''),
+                    'publisher': record.get('publisher', ''),
+                    'md5': record.get('md5', ''),
+                    'original_index': record.get('original_index', batch_num + i),
+                    'batch_number': current_batch
+                }
+                
+                # 检查当前记录是否已存在
+                if await vector_store.check_md5_exists(metadata['md5'], collection_name):
+                    batch_existing_count += 1
+                    logger.debug(f"跳过已存在记录: {metadata['md5'][:8]}...")
+                else:
+                    batch_texts.append(formatted_text)
+                    batch_metadatas.append(metadata)
+            
+            # 处理当前批次的新记录
+            if batch_texts:
+                logger.info(f"批次 {current_batch}: 需要向量化 {len(batch_texts)} 条，跳过 {batch_existing_count} 条")
+                
+                # 生成向量（分批）
+                processing_status["current_operation"] = f"为批次 {current_batch} 生成 {len(batch_texts)} 个向量"
+                logger.debug(f"为批次 {current_batch} 生成 {len(batch_texts)} 个向量...")
+                batch_embeddings = await embedding_service.get_batch_embeddings(batch_texts)
+                
+                # 立即写入数据库
+                processing_status["current_operation"] = f"将批次 {current_batch} 写入数据库"
+                logger.debug(f"将批次 {current_batch} 的数据写入数据库...")
+                batch_result = await vector_store.batch_add_documents(
+                    texts=batch_texts,
+                    embeddings=batch_embeddings,
+                    metadatas=batch_metadatas,
+                    collection_name=collection_name
+                )
+                
+                # 更新统计信息
+                total_added += batch_result['added_count']
+                total_skipped += batch_result['skipped_count'] + batch_existing_count
+                all_document_ids.extend(batch_result['document_ids'])
+                
+                # 更新全局进度
+                processing_status.update({
+                    "added_count": total_added,
+                    "skipped_count": total_skipped
+                })
+                
+                logger.info(f"批次 {current_batch} 完成: 添加 {batch_result['added_count']} 条")
             else:
-                texts_to_embed.append(record_item['formatted_text'])
-                metadatas_to_embed.append(metadata)
+                logger.info(f"批次 {current_batch}: 所有 {batch_existing_count} 条记录都已存在，跳过")
+                total_skipped += batch_existing_count
+                processing_status["skipped_count"] = total_skipped
+            
+            total_processed += len(batch_records)
+            processing_status["processed_records"] = total_processed
+            
+            # 进度日志
+            progress = (current_batch / total_batches) * 100
+            logger.info(f"总体进度: {progress:.1f}% ({total_processed}/{len(records)}) - 已添加: {total_added}, 已跳过: {total_skipped}")
         
-        logger.info(f"数据检查完成: 总记录 {len(records)} 条，已存在 {existing_count} 条，需要向量化 {len(texts_to_embed)} 条")
+        processing_status["current_operation"] = "处理完成"
+        logger.info(f"流式处理完成: 总处理 {total_processed} 条，添加 {total_added} 条，跳过 {total_skipped} 条")
         
-        if len(texts_to_embed) == 0:
-            logger.info("所有记录都已存在，无需向量化")
-            return {
-                "message": "所有记录都已存在，无需处理",
-                "total_processed": len(records),
-                "added_count": 0,
-                "skipped_count": len(records),
-                "document_ids": []
+        result = {
+            "message": "图书数据流式处理完成",
+            "total_processed": total_processed,
+            "added_count": total_added,
+            "skipped_count": total_skipped,
+            "document_ids": all_document_ids,
+            "processing_info": {
+                "total_batches": total_batches,
+                "batch_size": batch_size,
+                "streaming_mode": True
             }
-        
-        logger.info(f"开始生成 {len(texts_to_embed)} 个向量...")
-        logger.info(f"预计分为 {(len(texts_to_embed) + 99) // 100} 个批次，每批100条")
-        
-        # 只对不存在的记录生成向量
-        embeddings = await embedding_service.get_batch_embeddings(texts_to_embed)
-        logger.info("向量生成完成，开始存储...")
-        
-        # 批量存储（这里应该不会有重复，因为已经预过滤了）
-        result = await vector_store.batch_add_documents(
-            texts=texts_to_embed,
-            embeddings=embeddings,
-            metadatas=metadatas_to_embed,
-            collection_name=collection_name
-        )
-        
-        # 更新结果统计，包括预检查跳过的记录
-        result['total_processed'] = len(records)
-        result['skipped_count'] = result['skipped_count'] + existing_count
-        
-        logger.info(f"图书数据处理完成: 总处理 {result['total_processed']} 条，添加 {result['added_count']} 条，跳过 {result['skipped_count']} 条")
-        
-        return {
-            "message": "图书数据处理完成",
-            "total_processed": result['total_processed'],
-            "added_count": result['added_count'],
-            "skipped_count": result['skipped_count'],
-            "document_ids": result['document_ids']
         }
         
+        # 重置处理状态
+        processing_status.update({
+            "is_processing": False,
+            "current_operation": "完成",
+            "processed_records": total_processed,
+            "added_count": total_added,
+            "skipped_count": total_skipped
+        })
+        
+        return result
+        
     except HTTPException:
+        # HTTP异常直接抛出，同时重置状态
+        processing_status["is_processing"] = False
+        processing_status["current_operation"] = "处理异常"
         raise
     except Exception as e:
+        # 重置处理状态
+        processing_status.update({
+            "is_processing": False,
+            "current_operation": f"处理失败: {str(e)}"
+        })
+        
         logger.error(f"处理图书数据失败: {str(e)}")
         logger.error(f"记录数量: {len(records)}")
         logger.error(traceback.format_exc())
@@ -464,6 +567,15 @@ async def find_duplicates(request: dict):
             else:
                 return "similarity_only", 0.7
         
+        # 导入hashlib用于MD5计算
+        import hashlib
+        
+        logger.info("开始逐个处理记录进行去重分析...")
+        
+        # 统计信息
+        reused_embeddings_count = 0
+        new_embeddings_count = 0
+        
         for i, record in enumerate(records):
             if i in processed_indices:
                 continue
@@ -473,8 +585,20 @@ async def find_duplicates(request: dict):
             if not formatted_text:
                 formatted_text = f"{record.get('title', '')};{record.get('author', '')};{record.get('publisher', '')}"
             
-            # 生成查询向量
-            query_embedding = await embedding_service.get_embedding(formatted_text)
+            # 生成MD5
+            md5_hash = hashlib.md5(formatted_text.encode('utf-8')).hexdigest()
+            
+            # 尝试从数据库获取已存在的嵌入向量
+            query_embedding = await vector_store.get_embedding_by_md5(md5_hash, collection_name)
+            
+            if query_embedding is None:
+                # 如果数据库中没有，则计算新的嵌入向量
+                logger.debug(f"为记录 {i} 生成新的嵌入向量 (MD5: {md5_hash[:8]}...)")
+                query_embedding = await embedding_service.get_embedding(formatted_text)
+                new_embeddings_count += 1
+            else:
+                logger.debug(f"复用记录 {i} 的现有嵌入向量 (MD5: {md5_hash[:8]}...)")
+                reused_embeddings_count += 1
             
             # 搜索相似文档
             similar_results = await vector_store.search_similar(
@@ -531,6 +655,8 @@ async def find_duplicates(request: dict):
                 })
                 processed_indices.add(i)
         
+        logger.info(f"去重分析完成 - 复用向量: {reused_embeddings_count}, 新生成向量: {new_embeddings_count}")
+        
         return {
             "duplicate_groups": duplicate_groups,
             "total_groups": len(duplicate_groups),
@@ -539,6 +665,11 @@ async def find_duplicates(request: dict):
                 "min_similarity": similarity_threshold,
                 "require_author_or_publisher": True,
                 "matching_strategy": "multi-criteria (similarity + author/publisher)"
+            },
+            "performance_stats": {
+                "reused_embeddings": reused_embeddings_count,
+                "new_embeddings": new_embeddings_count,
+                "efficiency_ratio": f"{reused_embeddings_count}/{reused_embeddings_count + new_embeddings_count}"
             }
         }
         
@@ -684,5 +815,5 @@ if __name__ == "__main__":
         app, 
         host=settings.api_host, 
         port=settings.api_port, 
-        debug=settings.api_debug
+        reload=settings.api_debug
     )
