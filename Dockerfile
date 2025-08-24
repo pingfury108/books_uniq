@@ -18,16 +18,12 @@ RUN apt-get update \
         g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制依赖文件
-COPY requirements.lock pyproject.toml ./
+# 复制整个项目
+COPY . ./
 
 # 安装Python依赖
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.lock
-
-# 复制源代码
-COPY src/ ./src/
-COPY run.py ./
 
 # 创建数据目录
 RUN mkdir -p /app/data/chroma_db \
