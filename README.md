@@ -8,12 +8,29 @@
 - **向量存储**: 基于ChromaDB的持久化向量数据库
 - **相似性搜索**: 高效的向量相似性搜索
 - **批量处理**: 支持批量文本嵌入和处理
-- **RESTful API**: 完整的REST API接口
+- **Excel处理**: 支持Excel文件上传和图书数据去重
+- **异步处理**: 支持大批量数据的异步流式处理
+- **RESTful API**: 完整的REST API接口和Web界面
+- **Docker支持**: 完整的容器化部署方案
 - **配置管理**: 基于环境变量的配置系统
 
 ## 快速开始
 
-### 1. 环境准备
+### 方式1: Docker部署（推荐）
+
+```bash
+# 使用docker-compose启动
+docker-compose up -d
+
+# 或者直接运行Docker容器
+docker run -d \
+  -p 8098:8098 \
+  -v $(pwd)/data:/app/data \
+  -e VOLCENGINE_API_KEY=your_api_key \
+  your_dockerhub_username/books-uniq:latest
+```
+
+### 方式2: 本地开发
 
 ```bash
 # 克隆项目
@@ -27,7 +44,7 @@ rye sync
 pip install -e .
 ```
 
-### 2. 环境变量配置
+### 环境变量配置
 
 复制示例配置文件并编辑：
 
@@ -44,84 +61,91 @@ VOLCENGINE_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 EMBEDDING_MODEL=volcengine/doubao-embedding
 
 # ChromaDB配置
-CHROMA_PERSIST_DIRECTORY=./chroma_db
+CHROMA_PERSIST_DIRECTORY=./data/chroma_db
 
 # API配置
 API_HOST=0.0.0.0
-API_PORT=8000
+API_PORT=8098
 API_DEBUG=false
 ```
 
-### 3. 启动服务
+### 启动服务
 
 ```bash
 # 使用启动脚本
 python run.py
 
 # 或直接运行
-python -m uvicorn src.books_uniq.main:app --host 0.0.0.0 --port 8000
+python -m uvicorn src.books_uniq.main:app --host 0.0.0.0 --port 8098
 ```
 
-### 4. API文档
+## Docker构建和部署
 
-启动服务后，访问以下地址查看API文档：
+### 构建镜像
 
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+```bash
+# 构建Docker镜像
+docker build -t books-uniq:latest .
 
-## API接口
-
-### 嵌入文本
-
-**POST** `/embed`
-
-```json
-{
-  "text": "这是一个关于高考语文的文本内容",
-  "metadata": {
-    "subject": "语文",
-    "year": "2025",
-    "publisher": "教育科学出版社"
-  },
-  "collection_name": "books"
-}
+# 多平台构建
+docker buildx build --platform linux/amd64,linux/arm64 -t books-uniq:latest .
 ```
 
-### 批量嵌入文本
+### 推送到仓库
 
-**POST** `/embed/batch`
+```bash
+# 登录Docker Hub
+docker login
 
-```json
-{
-  "texts": [
-    "高考语文第一篇文章内容",
-    "高考语文第二篇文章内容"
-  ],
-  "metadatas": [
-    {"chapter": 1, "subject": "语文"},
-    {"chapter": 2, "subject": "语文"}
-  ],
-  "collection_name": "books"
-}
+# 标记镜像
+docker tag books-uniq:latest your_dockerhub_username/books-uniq:latest
+
+# 推送镜像
+docker push your_dockerhub_username/books-uniq:latest
 ```
 
-### 搜索相似文本
+### CI/CD自动构建
 
-**POST** `/search`
+项目集成了GitHub Actions自动构建和推送：
 
-```json
-{
-  "text": "查找关于语文的相关内容",
-  "collection_name": "books",
-  "n_results": 5
-}
-```
+1. 在GitHub仓库设置中添加以下Secrets：
+   - `DOCKERHUB_USERNAME`: Docker Hub用户名
+   - `DOCKERHUB_TOKEN`: Docker Hub访问令牌
 
-### 其他接口
+2. 推送代码到main分支将自动触发构建和推送
 
-- **GET** `/collections` - 列出所有集合
-- **GET** `/collections/{collection_name}/info` - 获取集合信息
-- **DELETE** `/documents/{document_id}` - 删除指定文档
+## API文档
+
+启动服务后，访问以下地址：
+
+- **Web界面**: http://localhost:8098
+- **Swagger UI**: http://localhost:8098/docs  
+- **ReDoc**: http://localhost:8098/redoc
+
+## 主要API接口
+
+### 异步处理接口
+
+**POST** `/start-processing` - 启动异步处理任务
+**GET** `/processing-status` - 获取处理进度
+
+### 文档处理接口
+
+**POST** `/upload-excel` - 上传Excel文件
+**POST** `/process-books` - 处理图书数据
+**POST** `/find-duplicates` - 查找重复记录
+
+### 向量化接口
+
+**POST** `/embed` - 单个文本嵌入
+**POST** `/embed/batch` - 批量文本嵌入
+**POST** `/search` - 相似性搜索
+
+### 数据管理接口
+
+**GET** `/collections` - 列出所有集合
+**GET** `/collections/{name}/info` - 获取集合信息
+**DELETE** `/collections/{name}/documents/{id}` - 删除文档
 
 ## 项目结构
 
@@ -129,36 +153,22 @@ python -m uvicorn src.books_uniq.main:app --host 0.0.0.0 --port 8000
 books_uniq/
 ├── src/
 │   └── books_uniq/
-│       ├── __init__.py
-│       ├── main.py              # FastAPI应用主文件
-│       ├── config.py            # 配置管理
-│       └── services/
-│           ├── __init__.py
-│           ├── embedding_service.py   # 向量化服务
-│           └── vector_store.py        # 向量存储服务
-├── .env.example                # 环境变量示例
-├── run.py                     # 启动脚本
-├── pyproject.toml            # 项目配置
-└── README.md                 # 项目说明
+│       ├── main.py                    # FastAPI应用主文件
+│       ├── config.py                  # 配置管理
+│       ├── services/                  # 服务层
+│       │   ├── embedding_service.py   # 向量化服务
+│       │   ├── vector_store.py        # 向量存储服务
+│       │   └── excel_processor.py     # Excel处理服务
+│       ├── templates/                 # Web模板
+│       └── static/                    # 静态资源
+├── .github/workflows/                 # GitHub Actions
+├── Dockerfile                         # Docker构建文件
+├── docker-compose.yml               # Docker Compose配置
+├── .dockerignore                     # Docker忽略文件
+├── .env.example                      # 环境变量示例
+├── requirements.lock                 # 依赖锁定文件
+└── README.md                         # 项目说明
 ```
-
-## 配置说明
-
-### 火山引擎配置
-
-- `VOLCENGINE_API_KEY`: 火山引擎API密钥 (必需)
-- `VOLCENGINE_BASE_URL`: API基础URL
-- `EMBEDDING_MODEL`: 使用的嵌入模型
-
-### ChromaDB配置
-
-- `CHROMA_PERSIST_DIRECTORY`: 向量数据库持久化目录
-
-### API配置
-
-- `API_HOST`: 服务监听地址
-- `API_PORT`: 服务端口
-- `API_DEBUG`: 是否启用调试模式
 
 ## 使用示例
 
@@ -167,37 +177,47 @@ books_uniq/
 ```python
 import requests
 
-# 嵌入文本
-response = requests.post("http://localhost:8000/embed", json={
-    "text": "2025版（5.3）高考A版新高考版 语文",
-    "metadata": {
-        "subject": "语文",
-        "publisher": "教育科学出版社"
-    }
-})
-print(response.json())
+# 上传Excel文件
+with open('books.xlsx', 'rb') as f:
+    response = requests.post("http://localhost:8098/upload-excel", 
+                           files={'file': f})
+    print(response.json())
 
-# 搜索相似文本
-response = requests.post("http://localhost:8000/search", json={
-    "text": "高考语文相关内容",
-    "n_results": 3
+# 启动异步处理
+response = requests.post("http://localhost:8098/start-processing", json={
+    "records": [...],  # Excel解析出的记录
+    "collection_name": "books"
 })
-print(response.json())
+task_id = response.json()['task_id']
+
+# 监控处理进度
+while True:
+    status = requests.get("http://localhost:8098/processing-status").json()
+    if status['completed']:
+        break
+    print(f"进度: {status['current_batch']}/{status['total_batches']}")
 ```
 
-## 开发
+## 开发和贡献
 
-### 安装开发依赖
+### 本地开发
 
 ```bash
-rye sync --no-lock
+# 安装开发依赖
+rye sync
+
+# 启动开发服务器
+python run.py
 ```
 
-### 运行测试
+### Docker开发环境
 
 ```bash
-# 待实现
-pytest
+# 启动开发环境
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f books-uniq
 ```
 
 ## 许可证

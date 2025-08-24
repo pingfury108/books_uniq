@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  books-uniq:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8098:8098"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8098
+      - API_DEBUG=false
+      - CHROMA_PERSIST_DIRECTORY=/app/data/chroma_db
+    volumes:
+      - chroma_data:/app/data/chroma_db
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8098/api"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 可选：Nginx反向代理
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - books-uniq
+    restart: unless-stopped
+    profiles:
+      - nginx
+
+volumes:
+  chroma_data:
+    driver: local
