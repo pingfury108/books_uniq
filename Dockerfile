@@ -1,5 +1,5 @@
-# 使用Python官方镜像作为基础镜像
-FROM python:3.11-slim-bullseye
+# 使用更新的Python基础镜像
+FROM python:3.11-slim-bookworm
 
 # 设置工作目录
 WORKDIR /app
@@ -9,14 +9,17 @@ ENV PYTHONPATH=/app/src
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# 安装系统依赖
+# 安装系统依赖，包括SQLite3
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
         gcc \
         g++ \
-    && rm -rf /var/lib/apt/lists/*
+        sqlite3 \
+        libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && sqlite3 --version
 
 # 复制整个项目
 COPY . ./
