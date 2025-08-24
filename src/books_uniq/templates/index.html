@@ -155,9 +155,9 @@
         <div id="results-section" class="results-section">
             <div class="row mb-4">
                 <div class="col-md-3">
-                    <div class="card stats-card text-center">
+                    <div class="card bg-primary text-white text-center">
                         <div class="card-body">
-                            <i class="fas fa-books fa-2x mb-2"></i>
+                            <i class="fas fa-book-open fa-2x mb-2"></i>
                             <h5>总书籍数</h5>
                             <h3 id="total-books">0</h3>
                         </div>
@@ -353,17 +353,17 @@
 
         // 向量化处理
         async function performEmbedding(records) {
-            updateProgress('embedding', 0, '正在检查已存在记录...');
-            addLog(`开始检查 ${records.length} 条记录是否已存在...`);
+            updateProgress('embedding', 0, '正在启动处理任务...');
+            addLog(`开始处理 ${records.length} 条记录...`);
             
-            const batchSize = 50; // 与后端保持一致
+            const batchSize = 50;
             const totalBatches = Math.ceil(records.length / batchSize);
             
             addLog(`将分 ${totalBatches} 批次处理，每批 ${batchSize} 条记录`, 'info');
             
             try {
-                // 启动处理请求（异步）
-                const processPromise = fetch('/process-books', {
+                // 1. 启动异步任务
+                const startResponse = await fetch('/start-processing', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -375,46 +375,74 @@
                     })
                 });
                 
-                // 启动进度监控
-                const progressInterval = setInterval(async () => {
+                if (!startResponse.ok) {
+                    const errorMessage = await handleApiError(startResponse, '启动处理任务');
+                    throw new Error(errorMessage);
+                }
+                
+                const startData = await startResponse.json();
+                const taskId = startData.task_id;
+                
+                addLog(`任务已启动 (ID: ${taskId.slice(-8)})，开始监控进度...`, 'success');
+                
+                // 2. 轮询监控进度
+                let result = null;
+                const pollInterval = 2000; // 2秒轮询一次
+                let lastLoggedBatch = 0;
+                
+                const pollProgress = async () => {
                     try {
                         const statusResponse = await fetch('/processing-status');
                         if (statusResponse.ok) {
                             const status = await statusResponse.json();
                             
+                            if (status.error) {
+                                throw new Error(status.error);
+                            }
+                            
                             if (status.is_processing) {
                                 // 更新进度条
-                                const progress = (status.current_batch / status.total_batches) * 100;
+                                const progress = status.total_batches > 0 
+                                    ? (status.current_batch / status.total_batches) * 100 
+                                    : 0;
                                 updateProgress('embedding', progress, status.current_operation);
                                 
-                                // 添加进度日志
-                                if (status.current_batch > 0) {
+                                // 避免重复日志，只在批次变化时记录
+                                if (status.current_batch > lastLoggedBatch) {
                                     const eta = status.estimated_remaining_seconds 
                                         ? `，预计剩余 ${Math.ceil(status.estimated_remaining_seconds / 60)} 分钟`
                                         : '';
-                                    addLog(`进度: ${status.current_batch}/${status.total_batches} 批次 (${progress.toFixed(1)}%)${eta}`, 'info');
+                                    addLog(`批次进度: ${status.current_batch}/${status.total_batches} (${progress.toFixed(1)}%)${eta}`, 'info');
+                                    lastLoggedBatch = status.current_batch;
                                 }
-                            } else {
-                                // 处理完成，停止监控
-                                clearInterval(progressInterval);
+                            }
+                            
+                            if (status.completed) {
+                                if (status.final_result) {
+                                    result = status.final_result;
+                                    return true; // 完成
+                                } else if (status.error) {
+                                    throw new Error(status.error);
+                                }
                             }
                         }
+                        return false; // 继续轮询
                     } catch (e) {
-                        // 静默处理进度获取错误
-                        console.debug('Progress fetch failed:', e);
+                        console.error('进度轮询失败:', e);
+                        return false;
                     }
-                }, 2000); // 每2秒检查一次进度
+                };
                 
-                // 等待处理完成
-                const response = await processPromise;
-                clearInterval(progressInterval); // 确保停止监控
-                
-                if (!response.ok) {
-                    const errorMessage = await handleApiError(response, '向量化处理');
-                    throw new Error(errorMessage);
+                // 开始轮询
+                while (true) {
+                    const completed = await pollProgress();
+                    if (completed) break;
+                    await new Promise(resolve => setTimeout(resolve, pollInterval));
                 }
                 
-                const result = await response.json();
+                if (!result) {
+                    throw new Error('处理完成但未获取到结果');
+                }
                 
                 updateProgress('embedding', 100, '向量化完成');
                 addLog(`向量化完成: 添加 ${result.added_count} 条，跳过重复 ${result.skipped_count} 条`, 'success');
@@ -587,7 +615,9 @@
                                         查看重复项 (${result.duplicates.length})
                                     </button>
                                     <div class="collapse mt-2" id="duplicates-${index}">
-                                        ${result.duplicates.map(dup => `
+                                        ${result.duplicates
+                                            .sort((a, b) => b.similarity - a.similarity) // 按相似度从高到低排序
+                                            .map(dup => `
                                             <div class="border-start border-danger ps-3 ms-2 mb-2">
                                                 <div class="d-flex justify-content-between">
                                                     <div>

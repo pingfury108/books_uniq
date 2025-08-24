@@ -290,7 +290,11 @@ processing_status = {
     "skipped_count": 0,
     "current_operation": "",
     "start_time": None,
-    "estimated_completion": None
+    "estimated_completion": None,
+    "task_id": None,
+    "completed": False,
+    "error": None,
+    "final_result": None
 }
 
 
@@ -316,6 +320,204 @@ async def get_processing_status():
     return status
 
 
+@app.post("/start-processing")
+async def start_processing(request: dict):
+    """
+    启动异步处理任务，立即返回任务ID
+    """
+    global processing_status
+    
+    # 检查是否已有任务在进行
+    if processing_status["is_processing"]:
+        raise HTTPException(status_code=409, detail="已有处理任务正在进行中，请稍后再试")
+    
+    records = request.get('records', [])
+    collection_name = request.get('collection_name', 'books')
+    batch_size = request.get('batch_size', 50)
+    
+    if not records:
+        raise HTTPException(status_code=400, detail="没有提供数据记录")
+    
+    # 生成任务ID
+    import uuid
+    import time
+    task_id = f"task_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+    
+    # 初始化任务状态
+    processing_status.update({
+        "is_processing": True,
+        "current_batch": 0,
+        "total_batches": (len(records) + batch_size - 1) // batch_size,
+        "processed_records": 0,
+        "total_records": len(records),
+        "added_count": 0,
+        "skipped_count": 0,
+        "current_operation": "任务已启动",
+        "start_time": time.time(),
+        "task_id": task_id,
+        "completed": False,
+        "error": None,
+        "final_result": None
+    })
+    
+    # 启动后台任务
+    import asyncio
+    asyncio.create_task(process_books_async(records, collection_name, batch_size))
+    
+    logger.info(f"异步任务已启动: {task_id}, 总记录数: {len(records)}")
+    
+    return {
+        "task_id": task_id,
+        "message": "处理任务已启动",
+        "total_records": len(records),
+        "total_batches": processing_status["total_batches"],
+        "batch_size": batch_size
+    }
+
+
+async def process_books_async(records: list, collection_name: str, batch_size: int):
+    """
+    后台异步处理函数
+    """
+    global processing_status
+    
+    try:
+        logger.info(f"开始后台流式处理 {len(records)} 条图书数据，集合: {collection_name}, 批大小: {batch_size}")
+        
+        # 统计信息
+        total_processed = 0
+        total_added = 0
+        total_skipped = 0
+        all_document_ids = []
+        
+        # 分批处理记录
+        total_batches = processing_status["total_batches"]
+        
+        for batch_num in range(0, len(records), batch_size):
+            batch_records = records[batch_num:batch_num + batch_size]
+            current_batch = (batch_num // batch_size) + 1
+            
+            # 更新进度状态
+            processing_status.update({
+                "current_batch": current_batch,
+                "current_operation": f"处理批次 {current_batch}/{total_batches}"
+            })
+            
+            logger.info(f"处理批次 {current_batch}/{total_batches}，记录 {batch_num+1}-{min(batch_num+batch_size, len(records))}")
+            
+            # 准备当前批次的数据
+            batch_texts = []
+            batch_metadatas = []
+            batch_existing_count = 0
+            
+            processing_status["current_operation"] = f"检查批次 {current_batch} 中的重复记录"
+            
+            for i, record in enumerate(batch_records):
+                # 使用分号分隔的格式
+                formatted_text = record.get('formatted_text', '')
+                if not formatted_text:
+                    formatted_text = f"{record.get('title', '')};{record.get('author', '')};{record.get('publisher', '')}"
+                
+                # 准备元数据
+                metadata = {
+                    'title': record.get('title', ''),
+                    'author': record.get('author', ''),
+                    'publisher': record.get('publisher', ''),
+                    'md5': record.get('md5', ''),
+                    'original_index': record.get('original_index', batch_num + i),
+                    'batch_number': current_batch
+                }
+                
+                # 检查当前记录是否已存在
+                if await vector_store.check_md5_exists(metadata['md5'], collection_name):
+                    batch_existing_count += 1
+                    logger.debug(f"跳过已存在记录: {metadata['md5'][:8]}...")
+                else:
+                    batch_texts.append(formatted_text)
+                    batch_metadatas.append(metadata)
+            
+            # 处理当前批次的新记录
+            if batch_texts:
+                logger.info(f"批次 {current_batch}: 需要向量化 {len(batch_texts)} 条，跳过 {batch_existing_count} 条")
+                
+                # 生成向量（分批）
+                processing_status["current_operation"] = f"为批次 {current_batch} 生成 {len(batch_texts)} 个向量"
+                logger.debug(f"为批次 {current_batch} 生成 {len(batch_texts)} 个向量...")
+                batch_embeddings = await embedding_service.get_batch_embeddings(batch_texts)
+                
+                # 立即写入数据库
+                processing_status["current_operation"] = f"将批次 {current_batch} 写入数据库"
+                logger.debug(f"将批次 {current_batch} 的数据写入数据库...")
+                batch_result = await vector_store.batch_add_documents(
+                    texts=batch_texts,
+                    embeddings=batch_embeddings,
+                    metadatas=batch_metadatas,
+                    collection_name=collection_name
+                )
+                
+                # 更新统计信息
+                total_added += batch_result['added_count']
+                total_skipped += batch_result['skipped_count'] + batch_existing_count
+                all_document_ids.extend(batch_result['document_ids'])
+                
+                # 更新全局进度
+                processing_status.update({
+                    "added_count": total_added,
+                    "skipped_count": total_skipped
+                })
+                
+                logger.info(f"批次 {current_batch} 完成: 添加 {batch_result['added_count']} 条")
+            else:
+                logger.info(f"批次 {current_batch}: 所有 {batch_existing_count} 条记录都已存在，跳过")
+                total_skipped += batch_existing_count
+                processing_status["skipped_count"] = total_skipped
+            
+            total_processed += len(batch_records)
+            processing_status["processed_records"] = total_processed
+            
+            # 进度日志
+            progress = (current_batch / total_batches) * 100
+            logger.info(f"总体进度: {progress:.1f}% ({total_processed}/{len(records)}) - 已添加: {total_added}, 已跳过: {total_skipped}")
+        
+        # 处理完成
+        processing_status.update({
+            "current_operation": "处理完成",
+            "completed": True,
+            "final_result": {
+                "message": "图书数据流式处理完成",
+                "total_processed": total_processed,
+                "added_count": total_added,
+                "skipped_count": total_skipped,
+                "document_ids": all_document_ids,
+                "processing_info": {
+                    "total_batches": total_batches,
+                    "batch_size": batch_size,
+                    "streaming_mode": True
+                }
+            }
+        })
+        
+        logger.info(f"后台流式处理完成: 总处理 {total_processed} 条，添加 {total_added} 条，跳过 {total_skipped} 条")
+        
+    except Exception as e:
+        # 处理失败
+        processing_status.update({
+            "is_processing": False,
+            "current_operation": f"处理失败: {str(e)}",
+            "error": str(e),
+            "completed": True
+        })
+        
+        logger.error(f"后台处理失败: {str(e)}")
+        logger.error(f"记录数量: {len(records)}")
+        logger.error(traceback.format_exc())
+    
+    finally:
+        # 标记处理完成
+        processing_status["is_processing"] = False
+
+
+# 保留原来的同步接口作为备用
 @app.post("/process-books")
 async def process_books_data(request: dict):
     """
