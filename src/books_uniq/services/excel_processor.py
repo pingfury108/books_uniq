@@ -106,9 +106,9 @@ class ExcelProcessor:
         records = []
         
         for index, row in df.iterrows():
-            title = str(row.get('title', '')).strip()
-            author = str(row.get('author', '')).strip()
-            publisher = str(row.get('publisher', '')).strip()
+            title = self._clean_pandas_string(str(row.get('title', '')))
+            author = self._clean_pandas_string(str(row.get('author', '')))
+            publisher = self._clean_pandas_string(str(row.get('publisher', '')))
             
             # 跳过完全空白的记录
             if not title and not author and not publisher:
@@ -179,10 +179,39 @@ class ExcelProcessor:
                     return col
         
         return None
-    
+
+    def _clean_pandas_string(self, text: str) -> str:
+        """
+        清理pandas Series的字符串表示，移除类似'Name: 0, dtype: object'的内容
+        """
+        if not isinstance(text, str):
+            return str(text) if text is not None else ''
+        
+        # 移除pandas特定的字符串模式
+        pandas_patterns = [
+            r'Name:.*dtype:.*',
+            r'dtype:.*',
+            r'Name:.*',
+            r'Series.*',
+            r'DataFrame.*'
+        ]
+        
+        import re
+        cleaned_text = text.strip()
+        
+        for pattern in pandas_patterns:
+            cleaned_text = re.sub(pattern, '', cleaned_text, flags=re.IGNORECASE)
+        
+        # 移除多余的分号和空格
+        cleaned_text = re.sub(r';+', ';', cleaned_text)
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
+        cleaned_text = cleaned_text.strip().strip(';').strip()
+        
+        return cleaned_text if cleaned_text else ''
+
     def _clean_data_types(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        清理数据类型
+        清理数据类型，避免pandas Series的字符串表示形式
         """
         try:
             # 文本字段处理
@@ -193,11 +222,13 @@ class ExcelProcessor:
                     # 转换为字符串，处理NaN值
                     series = series.astype(str)
                     series = series.fillna('')
-                    series = series.replace(['nan', 'None', 'null'], '')
-                    # 去除首尾空格
-                    df[field] = series.str.strip()
+                    series = series.replace(['nan', 'None', 'null', 'NaT'], '')
+                    # 去除首尾空格和pandas特定的字符串表示
+                    series = series.str.strip()
+                    # 处理pandas Series的字符串表示（如"Name: 0, dtype: object"）
+                    series = series.apply(lambda x: self._clean_pandas_string(x))
+                    df[field] = series
             
-            # 移除完全为空的记录
             # 确保所有必需字段都存在
             for field in self.required_fields:
                 if field not in df.columns:
@@ -217,7 +248,8 @@ class ExcelProcessor:
                     df[field] = ''
             # 将所有数据转为字符串
             for field in self.required_fields:
-                df[field] = df[field].astype(str).fillna('').replace(['nan', 'None', 'null'], '')
+                df[field] = df[field].astype(str).fillna('').replace(['nan', 'None', 'null', 'NaT'], '')
+                df[field] = df[field].apply(lambda x: self._clean_pandas_string(x))
         
         return df
     

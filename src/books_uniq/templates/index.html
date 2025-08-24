@@ -381,8 +381,8 @@
                 }
                 
                 // 显示API使用统计
-                if (expectedBatches > 1) {
-                    const avgTimePerBatch = actualMinutes * 60 / expectedBatches;
+                if (maxExpectedBatches > 1) {
+                    const avgTimePerBatch = actualMinutes * 60 / maxExpectedBatches;
                     addLog(`平均每批次耗时 ${avgTimePerBatch.toFixed(1)} 秒`, 'info');
                 }
                 

@@ -396,3 +396,36 @@ class VectorStore:
             
         except Exception as e:
             raise Exception(f"获取集合文档数量失败: {str(e)}")
+
+    async def get_document_metadata(
+        self, 
+        document_id: str, 
+        collection_name: str = "books"
+    ) -> Dict[str, Any]:
+        """
+        获取单个文档的元数据
+        """
+        try:
+            collection = self.get_or_create_collection(collection_name)
+            
+            # 获取指定文档
+            results = collection.get(
+                ids=[document_id],
+                include=["metadatas", "documents"]
+            )
+            
+            if not results['ids'] or len(results['ids']) == 0:
+                raise Exception(f"文档 {document_id} 未找到")
+            
+            metadata = results['metadatas'][0] if results['metadatas'] and results['metadatas'][0] else {}
+            document = results['documents'][0] if results['documents'] and results['documents'][0] else ""
+            
+            return {
+                "document_id": document_id,
+                "metadata": metadata,
+                "document_preview": document[:200] + "..." if len(document) > 200 else document,
+                "document_length": len(document)
+            }
+            
+        except Exception as e:
+            raise Exception(f"获取文档元数据失败: {str(e)}")

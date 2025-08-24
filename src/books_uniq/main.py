@@ -563,6 +563,19 @@ async def get_collection_info(collection_name: str):
         raise HTTPException(status_code=500, detail=f"获取集合信息失败: {str(e)}")
 
 
+@app.get("/collections/{collection_name}/documents/{document_id}/metadata")
+async def get_document_metadata(collection_name: str, document_id: str):
+    """
+    获取单个文档的元数据
+    """
+    try:
+        metadata = await vector_store.get_document_metadata(document_id, collection_name)
+        return metadata
+    except Exception as e:
+        logger.error(f"获取文档元数据失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取文档元数据失败: {str(e)}")
+
+
 @app.delete("/documents/{document_id}")
 async def delete_document(document_id: str, collection_name: str = "books"):
     """
