@@ -22,12 +22,12 @@
 # 使用docker-compose启动
 docker-compose up -d
 
-# 或者直接运行Docker容器
+# 或者从GitHub Container Registry运行
 docker run -d \
   -p 8098:8098 \
   -v $(pwd)/data:/app/data \
   -e VOLCENGINE_API_KEY=your_api_key \
-  your_dockerhub_username/books-uniq:latest
+  ghcr.io/your_github_username/books-uniq:latest
 ```
 
 ### 方式2: 本地开发
@@ -94,25 +94,23 @@ docker buildx build --platform linux/amd64,linux/arm64 -t books-uniq:latest .
 ### 推送到仓库
 
 ```bash
-# 登录Docker Hub
-docker login
+# 登录GitHub Container Registry
+echo $GITHUB_TOKEN | docker login ghcr.io -u your_github_username --password-stdin
 
 # 标记镜像
-docker tag books-uniq:latest your_dockerhub_username/books-uniq:latest
+docker tag books-uniq:latest ghcr.io/your_github_username/books-uniq:latest
 
-# 推送镜像
-docker push your_dockerhub_username/books-uniq:latest
+# 推送到GitHub Container Registry
+docker push ghcr.io/your_github_username/books-uniq:latest
 ```
 
 ### CI/CD自动构建
 
-项目集成了GitHub Actions自动构建和推送：
+项目集成了GitHub Actions自动构建和推送到GitHub Container Registry：
 
-1. 在GitHub仓库设置中添加以下Secrets：
-   - `DOCKERHUB_USERNAME`: Docker Hub用户名
-   - `DOCKERHUB_TOKEN`: Docker Hub访问令牌
-
-2. 推送代码到main分支将自动触发构建和推送
+1. 推送代码到main分支将自动触发构建和推送
+2. 镜像会自动发布到 `ghcr.io/your_github_username/books-uniq:latest`
+3. 支持多平台构建（linux/amd64, linux/arm64）
 
 ## API文档
 
