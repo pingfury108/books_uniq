@@ -1,9 +1,12 @@
 import uuid
 import hashlib
+import logging
 from typing import List, Dict, Any, Optional
 import chromadb
 from chromadb.config import Settings
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 # 检查是否安装了numpy
 try:
@@ -61,28 +64,75 @@ class VectorStore:
     
     async def check_batch_md5_exists(self, md5_hashes: List[str], collection_name: str = "books") -> Dict[str, bool]:
         """
-        批量检查MD5是否已存在于集合中，提高效率
+        批量检查MD5是否已存在于集合中，使用优化查询策略
+        性能优化：使用WHERE条件 + 分批查询，避免全量数据加载
         """
         try:
             collection = self.get_or_create_collection(collection_name)
             
-            # 获取所有已存在的MD5哈希
-            results = collection.get(
-                include=["metadatas"]
-            )
+            if not md5_hashes:
+                return {}
             
+            # 分批查询策略，避免单次查询过多MD5导致性能问题
+            batch_size = 500  # 每批查询500个MD5（ChromaDB推荐范围）
             existing_hashes = set()
-            metadatas = results.get('metadatas')
-            if metadatas is not None and len(metadatas) > 0:
-                for metadata in metadatas:
-                    if metadata and 'md5' in metadata:
-                        existing_hashes.add(metadata['md5'])
+            total_batches = (len(md5_hashes) + batch_size - 1) // batch_size
             
-            # 为每个查询的MD5返回是否存在的结果
-            return {md5: md5 in existing_hashes for md5 in md5_hashes}
+            logger.debug(f"批量MD5检查: {len(md5_hashes)} 个哈希，分为 {total_batches} 批次")
+            
+            for batch_idx in range(0, len(md5_hashes), batch_size):
+                batch_md5s = md5_hashes[batch_idx:batch_idx + batch_size]
+                current_batch = (batch_idx // batch_size) + 1
+                
+                try:
+                    # 优化方案：使用WHERE条件查询，只获取匹配的记录
+                    results = collection.get(
+                        where={"md5": {"$in": batch_md5s}},
+                        include=["metadatas"]
+                    )
+                    
+                    # 提取找到的MD5哈希
+                    metadatas = results.get('metadatas', [])
+                    if metadatas:
+                        for metadata in metadatas:
+                            if metadata and 'md5' in metadata:
+                                existing_hashes.add(metadata['md5'])
+                    
+                    logger.debug(f"批次 {current_batch}/{total_batches}: 查询 {len(batch_md5s)} 个，找到 {len([m for m in metadatas if m and 'md5' in m])} 个")
+                                
+                except Exception as where_error:
+                    # 降级方案1：使用ID查询（适用于MD5作为ID的情况）
+                    logger.warning(f"WHERE查询失败，尝试ID查询: {str(where_error)[:100]}...")
+                    
+                    try:
+                        id_results = collection.get(ids=batch_md5s)
+                        found_ids = id_results.get('ids', [])
+                        existing_hashes.update(found_ids)
+                        logger.debug(f"ID查询成功，找到 {len(found_ids)} 个匹配项")
+                        
+                    except Exception as id_error:
+                        # 降级方案2：逐个查询（最后手段）
+                        logger.warning(f"ID查询也失败，使用逐个查询: {str(id_error)[:100]}...")
+                        
+                        for md5 in batch_md5s:
+                            try:
+                                single_result = collection.get(where={"md5": md5}, limit=1)
+                                if len(single_result.get('ids', [])) > 0:
+                                    existing_hashes.add(md5)
+                            except:
+                                continue  # 单个查询失败则跳过
+            
+            # 构建结果字典
+            result = {md5: md5 in existing_hashes for md5 in md5_hashes}
+            
+            found_count = sum(result.values())
+            logger.debug(f"批量MD5检查完成: {found_count}/{len(md5_hashes)} 个已存在")
+            
+            return result
             
         except Exception as e:
-            # 如果查询失败，假设都不存在
+            logger.error(f"批量MD5检查失败: {str(e)}")
+            # 如果查询失败，假设都不存在（保守策略）
             return {md5: False for md5 in md5_hashes}
     
     async def add_document(

@@ -410,7 +410,11 @@ async def process_books_async(records: list, collection_name: str, batch_size: i
             batch_metadatas = []
             batch_existing_count = 0
             
-            processing_status["current_operation"] = f"检查批次 {current_batch} 中的重复记录"
+            processing_status["current_operation"] = f"批量检查批次 {current_batch} 中的重复记录"
+            
+            # 收集当前批次所有记录和MD5哈希
+            batch_record_data = []
+            batch_md5_hashes = []
             
             for i, record in enumerate(batch_records):
                 # 使用分号分隔的格式
@@ -428,13 +432,25 @@ async def process_books_async(records: list, collection_name: str, batch_size: i
                     'batch_number': current_batch
                 }
                 
-                # 检查当前记录是否已存在
-                if await vector_store.check_md5_exists(metadata['md5'], collection_name):
+                batch_record_data.append({
+                    'text': formatted_text,
+                    'metadata': metadata
+                })
+                batch_md5_hashes.append(metadata['md5'])
+            
+            # 批量检查MD5是否存在（性能优化）
+            logger.debug(f"批量检查 {len(batch_md5_hashes)} 个MD5...")
+            existing_md5_results = await vector_store.check_batch_md5_exists(batch_md5_hashes, collection_name)
+            
+            # 根据批量检查结果筛选新记录
+            for i, record_data in enumerate(batch_record_data):
+                md5_hash = batch_md5_hashes[i]
+                if existing_md5_results.get(md5_hash, False):
                     batch_existing_count += 1
-                    logger.debug(f"跳过已存在记录: {metadata['md5'][:8]}...")
+                    logger.debug(f"跳过已存在记录: {md5_hash[:8]}...")
                 else:
-                    batch_texts.append(formatted_text)
-                    batch_metadatas.append(metadata)
+                    batch_texts.append(record_data['text'])
+                    batch_metadatas.append(record_data['metadata'])
             
             # 处理当前批次的新记录
             if batch_texts:
@@ -581,7 +597,11 @@ async def process_books_data(request: dict):
             batch_metadatas = []
             batch_existing_count = 0
             
-            processing_status["current_operation"] = f"检查批次 {current_batch} 中的重复记录"
+            processing_status["current_operation"] = f"批量检查批次 {current_batch} 中的重复记录"
+            
+            # 收集当前批次所有记录和MD5哈希
+            batch_record_data = []
+            batch_md5_hashes = []
             
             for i, record in enumerate(batch_records):
                 # 使用分号分隔的格式
@@ -599,13 +619,25 @@ async def process_books_data(request: dict):
                     'batch_number': current_batch
                 }
                 
-                # 检查当前记录是否已存在
-                if await vector_store.check_md5_exists(metadata['md5'], collection_name):
+                batch_record_data.append({
+                    'text': formatted_text,
+                    'metadata': metadata
+                })
+                batch_md5_hashes.append(metadata['md5'])
+            
+            # 批量检查MD5是否存在（性能优化）
+            logger.debug(f"批量检查 {len(batch_md5_hashes)} 个MD5...")
+            existing_md5_results = await vector_store.check_batch_md5_exists(batch_md5_hashes, collection_name)
+            
+            # 根据批量检查结果筛选新记录
+            for i, record_data in enumerate(batch_record_data):
+                md5_hash = batch_md5_hashes[i]
+                if existing_md5_results.get(md5_hash, False):
                     batch_existing_count += 1
-                    logger.debug(f"跳过已存在记录: {metadata['md5'][:8]}...")
+                    logger.debug(f"跳过已存在记录: {md5_hash[:8]}...")
                 else:
-                    batch_texts.append(formatted_text)
-                    batch_metadatas.append(metadata)
+                    batch_texts.append(record_data['text'])
+                    batch_metadatas.append(record_data['metadata'])
             
             # 处理当前批次的新记录
             if batch_texts:

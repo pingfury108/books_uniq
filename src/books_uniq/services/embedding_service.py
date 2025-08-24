@@ -45,40 +45,53 @@ class EmbeddingService:
     
     async def get_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
-        批量获取文本的向量表示（遵守API限制：1200 RPM, 1200000 TPM）
+        批量获取文本的向量表示（优化后的API限制策略：1200 RPM, 1200000 TPM）
         """
         if not self.api_key or not self.client:
             raise ValueError("VOLCENGINE_API_KEY 环境变量未设置，请配置后再使用向量化功能")
         
-        # 批次设置：每批100个文档，遵守API限制
-        batch_size = 100
         all_embeddings = []
         
-        # API限制计算
+        # API限制参数
         max_requests_per_minute = 1200  # 1200 RPM
         max_tokens_per_minute = 1200000  # 1200000 TPM
         
-        # 计算每个文本的平均token数（估算，中文字符约等于token数）
-        avg_tokens_per_text = sum(len(text) for text in texts[:10]) // min(10, len(texts)) if texts else 50
+        # 计算每个文本的平均token数（中文字符约等于token数）
+        sample_texts = texts[:min(20, len(texts))]  # 扩大样本提高准确性
+        avg_tokens_per_text = sum(len(text) for text in sample_texts) // len(sample_texts) if sample_texts else 50
+        
+        # 动态批次大小：基于TPM限制优化
+        # 目标：使用90%的RPM配额，80%的TPM配额
+        target_requests_per_minute = max_requests_per_minute * 0.9  # 1080 requests/min
+        target_tokens_per_minute = max_tokens_per_minute * 0.8     # 960000 tokens/min
+        
+        # 计算最优批次大小
+        max_batch_size_by_tokens = int(target_tokens_per_minute / target_requests_per_minute / avg_tokens_per_text)
+        max_batch_size_by_api = 2000  # API单次最大限制（保守估算）
+        optimal_batch_size = min(max_batch_size_by_tokens, max_batch_size_by_api, 300)  # 不超过300条
+        
+        # 确保批次大小合理
+        batch_size = max(optimal_batch_size, 20)  # 最少20条
+        
+        # 计算请求间隔
         estimated_tokens_per_batch = avg_tokens_per_text * batch_size
         
-        # 计算需要的延迟时间
-        # 基于RPM限制：每60秒最多1200个请求
-        min_delay_for_rpm = 60.0 / max_requests_per_minute  # ~0.05秒
+        # 基于RPM的最小间隔
+        min_delay_rpm = 60.0 / target_requests_per_minute  # ~0.056秒
         
-        # 基于TPM限制：确保不超过token限制
-        estimated_batches_per_minute = max_tokens_per_minute // estimated_tokens_per_batch
-        min_delay_for_tpm = 60.0 / max(estimated_batches_per_minute, 1)
+        # 基于TPM的最小间隔
+        requests_per_minute_by_tokens = target_tokens_per_minute / estimated_tokens_per_batch
+        min_delay_tpm = 60.0 / requests_per_minute_by_tokens if requests_per_minute_by_tokens > 0 else min_delay_rpm
         
-        # 使用较大的延迟值，确保不超过任何限制
-        delay_seconds = max(min_delay_for_rpm, min_delay_for_tpm, 3.0)  # 最少3秒间隔
+        # 选择更严格的限制，并加10%安全边际
+        delay_seconds = max(min_delay_rpm, min_delay_tpm) * 1.1
         
         try:
             total_batches = (len(texts) + batch_size - 1) // batch_size
-            logger.info(f"开始批量处理 {len(texts)} 条文本，分为 {total_batches} 个批次")
-            logger.info(f"每批次 {batch_size} 个文档，批次间隔 {delay_seconds:.1f} 秒")
+            logger.info(f"开始优化批量处理 {len(texts)} 条文本，分为 {total_batches} 个批次")
+            logger.info(f"动态批次大小: {batch_size} 个文档，优化间隔: {delay_seconds:.3f} 秒")
             logger.info(f"预估每文本 {avg_tokens_per_text} tokens，每批次约 {estimated_tokens_per_batch} tokens")
-            logger.info(f"预计总耗时约 {(total_batches * delay_seconds) / 60:.1f} 分钟")
+            logger.info(f"预计总耗时约 {(total_batches * delay_seconds) / 60:.2f} 分钟 (优化前需 {(total_batches * 3.0) / 60:.1f} 分钟)")
             
             for i in range(0, len(texts), batch_size):
                 batch_texts = texts[i:i + batch_size]
@@ -86,22 +99,42 @@ class EmbeddingService:
                 
                 logger.info(f"处理第 {batch_num}/{total_batches} 批次，文本数量: {len(batch_texts)}")
                 
-                # 发送API请求
-                start_time = asyncio.get_event_loop().time()
-                response = await self.client.embeddings.create(
-                    model=self.model,
-                    input=batch_texts
-                )
+                # 发送API请求，添加重试机制
+                max_retries = 3
+                retry_count = 0
                 
-                batch_embeddings = [item.embedding for item in response.data]
-                all_embeddings.extend(batch_embeddings)
+                while retry_count < max_retries:
+                    try:
+                        start_time = asyncio.get_event_loop().time()
+                        response = await self.client.embeddings.create(
+                            model=self.model,
+                            input=batch_texts
+                        )
+                        
+                        batch_embeddings = [item.embedding for item in response.data]
+                        all_embeddings.extend(batch_embeddings)
+                        
+                        request_time = asyncio.get_event_loop().time() - start_time
+                        logger.info(f"第 {batch_num}/{total_batches} 批次完成，耗时 {request_time:.2f} 秒")
+                        break
+                        
+                    except Exception as e:
+                        retry_count += 1
+                        if "429" in str(e) or "rate limit" in str(e).lower():
+                            # API速率限制错误，使用指数退避
+                            backoff_time = delay_seconds * (2 ** retry_count)
+                            logger.warning(f"遇到API速率限制，第 {retry_count} 次重试，等待 {backoff_time:.1f} 秒...")
+                            await asyncio.sleep(backoff_time)
+                        else:
+                            # 其他错误，直接抛出
+                            raise e
                 
-                request_time = asyncio.get_event_loop().time() - start_time
-                logger.info(f"第 {batch_num}/{total_batches} 批次完成，耗时 {request_time:.2f} 秒")
+                if retry_count >= max_retries:
+                    raise Exception(f"API请求失败，已重试 {max_retries} 次")
                 
-                # 添加延迟以遵守API限制
+                # 添加优化后的延迟
                 if batch_num < total_batches:
-                    logger.info(f"等待 {delay_seconds:.1f} 秒后处理下一批次...")
+                    logger.debug(f"等待 {delay_seconds:.3f} 秒后处理下一批次...")
                     await asyncio.sleep(delay_seconds)
             
             logger.info(f"所有批次处理完成，总向量数: {len(all_embeddings)}")
