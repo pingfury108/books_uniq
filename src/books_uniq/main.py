@@ -393,7 +393,7 @@ async def process_books_data(request: dict):
 @app.post("/find-duplicates")
 async def find_duplicates(request: dict):
     """
-    查找重复的图书记录
+    查找重复的图书记录（增强版：结合相似度、作者、出版社多重判定）
     """
     try:
         records = request.get('records', [])
@@ -405,6 +405,64 @@ async def find_duplicates(request: dict):
         
         duplicate_groups = []
         processed_indices = set()
+        
+        def is_author_similar(author1, author2):
+            """判断作者是否相同或高度相似"""
+            if not author1 or not author2:
+                return False
+            
+            # 去除空格和特殊字符后比较
+            author1_clean = ''.join(author1.lower().split())
+            author2_clean = ''.join(author2.lower().split())
+            
+            # 完全相同
+            if author1_clean == author2_clean:
+                return True
+            
+            # 包含关系（一个作者包含另一个作者）
+            if author1_clean in author2_clean or author2_clean in author1_clean:
+                return True
+            
+            # 编辑距离相似性（对于短字符串）
+            if len(author1_clean) > 3 and len(author2_clean) > 3:
+                try:
+                    from Levenshtein import ratio
+                    similarity = ratio(author1_clean, author2_clean)
+                    return similarity >= 0.8
+                except ImportError:
+                    # 如果没有安装Levenshtein，使用简单的字符串相似度
+                    # 计算Jaccard相似度作为备选
+                    set1 = set(author1_clean)
+                    set2 = set(author2_clean)
+                    intersection = len(set1 & set2)
+                    union = len(set1 | set2)
+                    if union > 0:
+                        jaccard_similarity = intersection / union
+                        return jaccard_similarity >= 0.7
+                    return False
+            
+            return False
+        
+        def get_match_type(original_record, duplicate_record):
+            """获取匹配类型和置信度"""
+            author_match = is_author_similar(
+                original_record.get('author', ''), 
+                duplicate_record.get('author', '')
+            )
+            
+            publisher_match = (
+                original_record.get('publisher', '').strip().lower() == 
+                duplicate_record.get('publisher', '').strip().lower()
+            )
+            
+            if author_match and publisher_match:
+                return "author_publisher_match", 1.0
+            elif author_match:
+                return "author_match", 0.9
+            elif publisher_match:
+                return "publisher_match", 0.8
+            else:
+                return "similarity_only", 0.7
         
         for i, record in enumerate(records):
             if i in processed_indices:
@@ -422,37 +480,66 @@ async def find_duplicates(request: dict):
             similar_results = await vector_store.search_similar(
                 query_embedding=query_embedding,
                 collection_name=collection_name,
-                n_results=20,
-                min_similarity=similarity_threshold
+                n_results=30,  # 增加查询数量以便更好过滤
+                min_similarity=0.85  # 使用统一的相似度阈值
             )
             
-            # 过滤出真正相似的记录
-            duplicates = []
+            # 多重条件过滤
+            qualified_duplicates = []
             for result in similar_results:
-                if result['similarity'] >= similarity_threshold:
-                    # 查找原始记录索引
-                    original_index = result['metadata'].get('original_index')
-                    if original_index is not None and original_index != i:
-                        duplicates.append({
-                            'record': records[original_index] if original_index < len(records) else {},
-                            'similarity': result['similarity'],
-                            'original_index': original_index
-                        })
-                        processed_indices.add(original_index)
+                # 基础相似度要求
+                if result['similarity'] < similarity_threshold:
+                    continue
+                    
+                # 查找原始记录索引
+                original_index = result['metadata'].get('original_index')
+                if original_index is None or original_index == i or original_index in processed_indices:
+                    continue
+                
+                # 获取对应的原始记录
+                duplicate_record = records[original_index] if original_index < len(records) else {}
+                
+                # 多重条件判定
+                match_type, confidence = get_match_type(record, duplicate_record)
+                
+                # 只保留符合条件的重复记录
+                if match_type != "similarity_only":  # 排除仅相似度匹配的情况
+                    qualified_duplicates.append({
+                        'record': duplicate_record,
+                        'similarity': result['similarity'],
+                        'original_index': original_index,
+                        'match_type': match_type,
+                        'confidence': confidence,
+                        'match_reason': f"相似度: {result['similarity']:.3f}, 匹配类型: {match_type}"
+                    })
             
-            if duplicates:
+            # 按置信度排序
+            qualified_duplicates.sort(key=lambda x: x['confidence'], reverse=True)
+            
+            if qualified_duplicates:
+                # 标记所有相关索引为已处理
+                for dup in qualified_duplicates:
+                    processed_indices.add(dup['original_index'])
+                
                 duplicate_groups.append({
                     'original': record,
                     'original_index': i,
-                    'duplicates': duplicates,
-                    'total_count': len(duplicates) + 1
+                    'duplicates': qualified_duplicates,
+                    'total_count': len(qualified_duplicates) + 1,
+                    'primary_match_type': qualified_duplicates[0]['match_type'] if qualified_duplicates else "none",
+                    'average_confidence': sum(d['confidence'] for d in qualified_duplicates) / len(qualified_duplicates) if qualified_duplicates else 0
                 })
                 processed_indices.add(i)
         
         return {
             "duplicate_groups": duplicate_groups,
             "total_groups": len(duplicate_groups),
-            "processed_records": len(processed_indices)
+            "processed_records": len(processed_indices),
+            "matching_criteria": {
+                "min_similarity": similarity_threshold,
+                "require_author_or_publisher": True,
+                "matching_strategy": "multi-criteria (similarity + author/publisher)"
+            }
         }
         
     except Exception as e:

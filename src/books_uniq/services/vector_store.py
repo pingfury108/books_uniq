@@ -201,7 +201,7 @@ class VectorStore:
         query_embedding: List[float],
         collection_name: str = "books",
         n_results: int = 5,
-        min_similarity: float = 0.7
+        min_similarity: float = 0.85
     ) -> List[Dict[str, Any]]:
         """
         搜索相似文档（增加最小相似度阈值）
